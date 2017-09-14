@@ -62,6 +62,12 @@ static long fanotify_mark(int fd, unsigned int flags, uint64_t mask,
 #ifndef FAN_REPORT_TID
 #define FAN_REPORT_TID		0x00000100
 #endif
+#ifndef FAN_REPORT_FILENAME
+#define FAN_REPORT_FILENAME	0x00000400
+#endif
+#ifndef FAN_REPORT_COOKIE
+#define FAN_REPORT_COOKIE	0x00000800
+#endif
 
 #ifndef FAN_MARK_INODE
 #define FAN_MARK_INODE		0
