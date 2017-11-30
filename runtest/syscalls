@@ -539,6 +539,7 @@ fanotify14 fanotify14
 fanotify15 fanotify15
 
 fanotify102 fanotify102
+fanotify105 fanotify105
 
 ioperm01 ioperm01
 ioperm02 ioperm02
