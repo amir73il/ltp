@@ -18,7 +18,13 @@
  * DESCRIPTION
  *  Basic test for fcntl(2) using F_SETLEASE & F_WRLCK argument.
  *  "A write lease may be placed on a file only if there are
- *  no other open file descriptors for the file."
+ *  no other open file descriptors for the file." (*)
+ *
+ *  (*) The man page for open(2) says about a file descriptor created with
+ *  O_PATH: "...The file itself is not opened".
+ *  It is also the existing behavior that getting a file descriptor with O_PATH
+ *  does not break existing write leases.  Therefore, existing file descriptors
+ *  created with O_PATH should NOT prevent taking F_SETLEASE & F_WRLCK.
  */
 
 #include <errno.h>
@@ -43,12 +49,15 @@ static struct test_case_t {
 	{O_RDONLY, O_RDONLY},
 	{O_RDONLY, O_WRONLY},
 	{O_RDONLY, O_RDWR},
+	{O_RDONLY, O_PATH},
 	{O_WRONLY, O_RDONLY},
 	{O_WRONLY, O_WRONLY},
 	{O_WRONLY, O_RDWR},
+	{O_WRONLY, O_PATH},
 	{O_RDWR, O_RDONLY},
 	{O_RDWR, O_WRONLY},
 	{O_RDWR, O_RDWR},
+	{O_RDWR, O_PATH},
 };
 
 char *TCID = "fcntl32";
@@ -104,13 +113,26 @@ static void verify_fcntl(int i)
 	TEST(fcntl(fd1, F_SETLEASE, F_WRLCK));
 
 	if (TEST_RETURN == 0) {
-		tst_resm(TFAIL, "fcntl(F_SETLEASE, F_WRLCK) "
-			 "succeeded unexpectedly");
+		if (test_cases[i].fd2_flag & O_PATH) {
+			tst_resm(TPASS, "fcntl(F_SETLEASE, F_WRLCK) "
+				 "with existing open(O_PATH) "
+				 "succeeded as expected");
+		} else {
+			tst_resm(TFAIL, "fcntl(F_SETLEASE, F_WRLCK) "
+				 "succeeded unexpectedly");
+		}
 	} else {
 		if (TEST_ERRNO == EBUSY || TEST_ERRNO == EAGAIN) {
-			tst_resm(TPASS | TTERRNO,
-				 "fcntl(F_SETLEASE, F_WRLCK) "
-				 "failed as expected");
+			if (test_cases[i].fd2_flag & O_PATH) {
+				tst_resm(TFAIL | TTERRNO,
+					 "fcntl(F_SETLEASE, F_WRLCK) "
+					 "with existing open(O_PATH) "
+					 "failed unexpectedly");
+			} else {
+				tst_resm(TPASS | TTERRNO,
+					 "fcntl(F_SETLEASE, F_WRLCK) "
+					 "failed as expected");
+			}
 		} else {
 			tst_resm(TFAIL | TTERRNO,
 				 "fcntl(F_SETLEASE, F_WRLCK) "
