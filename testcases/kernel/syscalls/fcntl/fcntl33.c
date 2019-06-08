@@ -115,12 +115,7 @@ static void do_test(unsigned int i)
 
 	TEST(fcntl(fd, F_SETLEASE, test_cases[i].lease_type));
 	if (TST_RET == -1) {
-		if (type == TST_OVERLAYFS_MAGIC && TST_ERR == EAGAIN) {
-			tst_res(TINFO | TTERRNO,
-				"fcntl(F_SETLEASE, F_WRLCK) failed on overlayfs as expected");
-		} else {
-			tst_res(TFAIL | TTERRNO, "fcntl() failed to set lease");
-		}
+		tst_res(TFAIL | TTERRNO, "fcntl() failed to set lease");
 		TST_CHECKPOINT_WAKE(0);
 		goto exit;
 	}
