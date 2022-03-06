@@ -101,6 +101,18 @@ static inline int safe_fanotify_mark(const char *file, const int lineno,
 #ifndef FAN_MARK_FILESYSTEM
 #define FAN_MARK_FILESYSTEM	0x00000100
 #endif
+#ifndef FAN_MARK_CREATE
+#define FAN_MARK_CREATE		0x00000200
+#endif
+#ifndef FAN_MARK_VOLATILE
+#define FAN_MARK_VOLATILE	0x00000400
+#endif
+
+/* Non-uapi convenience macros */
+#ifndef FAN_MARK_CREATE_VOLATILE
+#define FAN_MARK_CREATE_VOLATILE (FAN_MARK_CREATE | FAN_MARK_VOLATILE)
+#endif
+
 /* New dirent event masks */
 #ifndef FAN_ATTRIB
 #define FAN_ATTRIB		0x00000004
