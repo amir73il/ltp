@@ -69,49 +69,9 @@ static void test_fanotify(void)
 	 * Volatile mark on file ignores ACCESS events
 	 */
 
-	errno = 0;
-	ret = fanotify_mark(fd_notify, FAN_MARK_ADD | FAN_MARK_VOLATILE |
-			    FAN_MARK_IGNORED_MASK | FAN_MARK_IGNORED_SURV_MODIFY,
-			    FAN_ATTRIB, AT_FDCWD, TEST_FILE);
-	if (ret < 0 && errno == EINVAL) {
-		tst_res(TPASS,
-			"FAN_MARK_VOLATILE without FAN_MARK_CREATE"
-			" failed with error EINVAL as expected");
-	} else {
-		tst_res(TFAIL | TERRNO,
-			"FAN_MARK_VOLATILE without FAN_MARK_CREATE"
-			" did not fail with error EINVAL as expected");
-	}
-
-	SAFE_FANOTIFY_MARK(fd_notify, FAN_MARK_ADD | FAN_MARK_CREATE_VOLATILE |
+	SAFE_FANOTIFY_MARK(fd_notify, FAN_MARK_ADD | FAN_MARK_VOLATILE |
 			   FAN_MARK_IGNORED_MASK | FAN_MARK_IGNORED_SURV_MODIFY,
 			   FAN_ATTRIB, AT_FDCWD, TEST_FILE);
-
-	errno = 0;
-	ret = fanotify_mark(fd_notify, FAN_MARK_ADD | FAN_MARK_CREATE,
-			    FAN_ACCESS, AT_FDCWD, TEST_FILE);
-	if (ret < 0 && errno == EEXIST) {
-		tst_res(TPASS,
-			"FAN_MARK_CREATE on existing mark"
-			" failed with error EEXIST as expected");
-	} else {
-		tst_res(TFAIL | TERRNO,
-			"FAN_MARK_CREATE on existing mark"
-			" did not fail with error EEXIST as expected");
-	}
-
-	errno = 0;
-	ret = fanotify_mark(fd_notify, FAN_MARK_REMOVE | FAN_MARK_CREATE,
-			    FAN_ACCESS, AT_FDCWD, TEST_FILE);
-	if (ret < 0 && errno == EINVAL) {
-		tst_res(TPASS,
-			"FAN_MARK_CREATE with FAN_MARK_REMOVE"
-			" failed with error EINVAL as expected");
-	} else {
-		tst_res(TFAIL | TERRNO,
-			"FAN_MARK_CREATE with FAN_MARK_REMOVE"
-			" did not fail with error EINVAL as expected");
-	}
 
 	/* ATTRIB event should be ignored */
 	SAFE_CHMOD(TEST_FILE, 0600);
@@ -205,7 +165,7 @@ static void setup(void)
 {
 	SAFE_TOUCH(TEST_FILE, 0666, NULL);
 
-	REQUIRE_MARK_TYPE_SUPPORTED_BY_KERNEL(FAN_MARK_CREATE_VOLATILE);
+	REQUIRE_MARK_TYPE_SUPPORTED_BY_KERNEL(FAN_MARK_VOLATILE);
 	REQUIRE_FANOTIFY_EVENTS_SUPPORTED_ON_FS(FAN_CLASS_NOTIF|FAN_REPORT_FID,
 						FAN_MARK_FILESYSTEM,
 						FAN_ATTRIB, ".");
