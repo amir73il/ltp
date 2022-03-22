@@ -151,6 +151,10 @@ static inline int safe_fanotify_mark(const char *file, const int lineno,
 #define FAN_EPIDFD		-2
 #endif
 
+#ifndef FAN_IOC_SET_MARK_PAGE_ORDER
+#define FAN_IOC_SET_MARK_PAGE_ORDER	_IOW(0xfa, 1, long)
+#endif
+
 /* Flags required for unprivileged user group */
 #define FANOTIFY_REQUIRED_USER_INIT_FLAGS    (FAN_REPORT_FID)
 

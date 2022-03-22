@@ -18,6 +18,7 @@
 #include <sys/types.h>
 #include <errno.h>
 #include <string.h>
+#include <time.h>
 #include <sys/syscall.h>
 #include "tst_test.h"
 
@@ -29,6 +30,11 @@
 #define EVENT_SIZE  (sizeof (struct fanotify_event_metadata))
 /* reasonable guess as to size of 1024 events */
 #define EVENT_BUF_LEN        (EVENT_MAX * EVENT_SIZE)
+/* limit number and size of large marks to allocate */
+#define LARGE_MARK_PAGE_ORDER 9 /* 2MB */
+#define LARGE_MARK_KB (4 << LARGE_MARK_PAGE_ORDER)
+#define LARGE_MARKS_MAX	50000
+#define LARGE_MARKS_MAX_KB (LARGE_MARKS_MAX * LARGE_MARK_KB)
 
 #define MOUNT_PATH "fs_mnt"
 #define TEST_FILE MOUNT_PATH "/testfile"
@@ -51,6 +57,24 @@ static void fsync_file(const char *path)
 	SAFE_CLOSE(fd);
 }
 
+static int check_ignore_mark(void)
+{
+	unsigned int ignored_mask, mflags;
+	char procfdinfo[100];
+
+	sprintf(procfdinfo, "/proc/%d/fdinfo/%d", (int)getpid(), fd_notify);
+	if (FILE_LINES_SCANF(procfdinfo, "fanotify ino:%*x sdev:%*x mflags: %x mask:0 ignored_mask:%x",
+				&mflags, &ignored_mask)) {
+		tst_res(TINFO, "No fanotify ignore marks");
+		return 0;
+	} else {
+		tst_res(TINFO, "Found %sevictable ignore mark (ignored_mask=%x, mflags=%x) in %s",
+				(mflags & FAN_MARK_EVICTABLE) ? "" : "non-",
+				ignored_mask, mflags, procfdinfo);
+		return 1;
+	}
+}
+
 static void verify_mark_removed(const char *path, const char *when)
 {
 	int ret;
@@ -71,6 +95,79 @@ static void verify_mark_removed(const char *path, const char *when)
 			"FAN_MARK_REMOVE did not fail with ENOENT as expected"
 			" %s", when);
 	}
+	check_ignore_mark();
+}
+
+static int add_large_mark(const char *path)
+{
+	time_t end, start = time(NULL);
+	int ret;
+
+	/*
+	 * Adding a large mark should either succeed or fail with ENOMEM.
+	 */
+	errno = 0;
+	ret = fanotify_mark(fd_notify, FAN_MARK_ADD,
+			    FAN_ACCESS, AT_FDCWD, path);
+	if (ret == -1 && errno == ENOMEM) {
+		tst_res(TPASS,
+			"Adding large mark failed with ENOMEM as expected");
+	} else if (ret) {
+		tst_res(TFAIL | TERRNO,
+			"Adding large mark failed with unexpected error");
+	} else {
+		end = time(NULL);
+		ret = ((end - start) > 1);
+	}
+
+	return ret;
+}
+
+static void test_direct_reclaim(void)
+{
+	long free;
+	int i = 0;
+
+	SAFE_FILE_LINES_SCANF("/proc/meminfo", "MemFree: %ld", &free);
+	tst_res(TINFO, "System has %ld kB of free mem", free);
+
+	if (free > LARGE_MARKS_MAX_KB) {
+		tst_res(TCONF, "Skipping direct reclaim test on large system");
+		return;
+	}
+
+	/*
+	 * Test direct reclaim of inode with evictable mark.
+	 *
+	 * We try to get into direct reclaim by allocating an infinite number
+	 * of empty marks.
+	 */
+	fsync_file(TEST_FILE);
+	SAFE_FANOTIFY_MARK(fd_notify, FAN_MARK_ADD | FAN_MARK_EVICTABLE |
+			   FAN_MARK_IGNORED_MASK | FAN_MARK_IGNORED_SURV_MODIFY,
+			   FAN_ACCESS, AT_FDCWD, TEST_FILE);
+	check_ignore_mark();
+
+	tst_res(TINFO, "Setting large mark size to %d kB", LARGE_MARK_KB);
+	SAFE_IOCTL(fd_notify, FAN_IOC_SET_MARK_PAGE_ORDER, LARGE_MARK_PAGE_ORDER);
+	tst_res(TINFO, "Allocating %d large marks...", LARGE_MARKS_MAX);
+	while (i < LARGE_MARKS_MAX) {
+		if (add_large_mark(MOUNT_PATH))
+			break;
+		if (++i % 1000 == 0) {
+			tst_res(TINFO, "Allocated %d large marks", i);
+			/* Stop if ignore mark was evicted */
+			if (!check_ignore_mark())
+				return;
+		}
+	}
+	tst_res(TINFO, "Allocated %d large marks", i);
+
+	/*
+	 * Kicking reclaim may or may not have evicted the evictable mark.
+	 * The important thing is not to deadlock in direct reclaim!!!
+	 */
+	check_ignore_mark();
 }
 
 static void test_fanotify(void)
@@ -80,7 +177,8 @@ static void test_fanotify(void)
 	int tst_count = 0;
 
 	fd_notify = SAFE_FANOTIFY_INIT(FAN_CLASS_NOTIF | FAN_REPORT_FID |
-				       FAN_NONBLOCK, O_RDONLY);
+				       FAN_NONBLOCK | FAN_UNLIMITED_MARKS,
+				       O_RDONLY);
 
 	/*
 	 * Verify that evictable mark can be upgraded to non-evictable
@@ -205,6 +303,8 @@ static void test_fanotify(void)
 			SAFE_CLOSE(event->fd);
 		event = FAN_EVENT_NEXT(event, len);
 	}
+
+	test_direct_reclaim();
 
 	SAFE_CLOSE(fd_notify);
 }
