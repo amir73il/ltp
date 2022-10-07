@@ -88,6 +88,10 @@ static inline int safe_fanotify_mark(const char *file, const int lineno,
 #define FAN_REPORT_DFID_NAME_TARGET (FAN_REPORT_DFID_NAME | \
 				     FAN_REPORT_FID | FAN_REPORT_TARGET_FID)
 #endif
+#ifndef FAN_XATTR_IGNORE_MASK
+#define FAN_XATTR_IGNORE_MASK	0x00010000
+#endif
+
 
 /* Non-uapi convenience macros */
 #ifndef FAN_REPORT_DFID_NAME_FID
@@ -108,6 +112,9 @@ static inline int safe_fanotify_mark(const char *file, const int lineno,
 #endif
 #ifndef FAN_MARK_IGNORE
 #define FAN_MARK_IGNORE		0x00000400
+#endif
+#ifndef FAN_MARK_XATTR
+#define FAN_MARK_XATTR		0x00000800
 #endif
 #ifndef FAN_MARK_IGNORE_SURV
 #define FAN_MARK_IGNORE_SURV	(FAN_MARK_IGNORE | FAN_MARK_IGNORED_SURV_MODIFY)
@@ -163,6 +170,9 @@ static inline int safe_fanotify_mark(const char *file, const int lineno,
 #ifndef FAN_RENAME
 #define FAN_RENAME		0x10000000
 #endif
+#ifndef FAN_LOOKUP_PERM
+#define FAN_LOOKUP_PERM		0x00080000
+#endif
 
 /* Additional error status codes that can be returned to userspace */
 #ifndef FAN_NOPIDFD
@@ -183,7 +193,7 @@ static inline int safe_fanotify_mark(const char *file, const int lineno,
  * macro.
  */
 #define LTP_ALL_PERM_EVENTS	(FAN_OPEN_PERM | FAN_OPEN_EXEC_PERM | \
-				 FAN_ACCESS_PERM)
+				 FAN_ACCESS_PERM | FAN_LOOKUP_PERM)
 
 struct fanotify_group_type {
 	unsigned int flag;

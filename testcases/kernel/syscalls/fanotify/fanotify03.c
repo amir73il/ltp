@@ -199,6 +199,24 @@ static void check_child(void)
 		tst_res(TFAIL, "child %s", tst_strstatus(child_ret));
 }
 
+static void verify_getxattr(const char *path)
+{
+	ssize_t res;
+	char buf[4];
+
+	res = SAFE_GETXATTR(path, "security.fsnotify.ignore_mask",
+			    buf, sizeof(buf));
+
+	if (res != sizeof(buf)) {
+		tst_res(TFAIL, "Return size %d when acquiring "
+			"the value of security.fsnotify.ignore_mask", (int)res);
+		return;
+	}
+
+	res = ntohl(*(int*)buf);
+	tst_res(TPASS, "security.fsnotify.ignore_mask = 0x%08x", (int)res);
+}
+
 static int setup_mark(unsigned int n)
 {
 	unsigned int i = 0;
@@ -218,11 +236,17 @@ static int setup_mark(unsigned int n)
 		return -1;
 	}
 
-	fd_notify = SAFE_FANOTIFY_INIT(FAN_CLASS_CONTENT, O_RDONLY);
-
+	fd_notify = SAFE_FANOTIFY_INIT(FAN_CLASS_PRE_CONTENT | FAN_XATTR_IGNORE_MASK, O_RDONLY);
+	if (!n) {
+		SAFE_FANOTIFY_MARK(fd_notify, FAN_MARK_ADD | FAN_MARK_IGNORE_SURV | FAN_MARK_XATTR,
+				   FAN_ACCESS_PERM | FAN_EVENT_ON_CHILD, AT_FDCWD, MOUNT_PATH);
+	}
+	verify_getxattr(MOUNT_PATH);
 	for (; i < ARRAY_SIZE(files); i++) {
 		SAFE_FANOTIFY_MARK(fd_notify, FAN_MARK_ADD | mark->flag,
 				  tc->mask, AT_FDCWD, files[i]);
+		//SAFE_FANOTIFY_MARK(fd_notify, FAN_MARK_ADD | FAN_MARK_IGNORE_SURV | FAN_MARK_XATTR,
+		//		   FAN_ACCESS_PERM, AT_FDCWD, files[i]);
 	}
 
 	return 0;
