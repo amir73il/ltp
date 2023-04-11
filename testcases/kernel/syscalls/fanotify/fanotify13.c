@@ -90,6 +90,7 @@ static struct test_case_t {
 
 static int nofid_fd;
 static int fanotify_fd;
+static int fanotify_init_flags;
 static int filesystem_mark_unsupported;
 static char events_buf[BUF_SIZE];
 static struct event_t event_set[EVENT_MAX];
@@ -143,15 +144,16 @@ static void do_test(unsigned int number)
 	struct fanotify_mark_type *mark = &tc->mark;
 
 	tst_res(TINFO,
-		"Test #%d: FAN_REPORT_FID with mark flag: %s",
-		number, mark->name);
+		"Test #%d: %s with mark flag: %s", number,
+		(fanotify_init_flags & FAN_REPORT_ANY_FID) ?
+			"FAN_REPORT_ANY_FID" : "FAN_REPORT_FID", mark->name);
 
 	if (filesystem_mark_unsupported && mark->flag & FAN_MARK_FILESYSTEM) {
 		tst_res(TCONF, "FAN_MARK_FILESYSTEM not supported in kernel?");
 		return;
 	}
 
-	fanotify_fd = SAFE_FANOTIFY_INIT(FAN_CLASS_NOTIF | FAN_REPORT_FID, O_RDONLY);
+	fanotify_fd = SAFE_FANOTIFY_INIT(FAN_CLASS_NOTIF | fanotify_init_flags, O_RDONLY);
 
 	/*
 	 * Place marks on a set of objects and setup the expected masks
@@ -261,7 +263,13 @@ out:
 
 static void do_setup(void)
 {
-	REQUIRE_FANOTIFY_INIT_FLAGS_SUPPORTED_ON_FS(FAN_REPORT_FID, MOUNT_PATH);
+	/* Try FAN_REPORT_ANY_FID */
+	fanotify_init_flags = FAN_REPORT_FID | FAN_REPORT_ANY_FID;
+	if (fanotify_init_flags_supported_on_fs(fanotify_init_flags, MOUNT_PATH)) {
+		/* Fallback to FAN_REPORT_FID */
+		fanotify_init_flags = FAN_REPORT_FID;
+		REQUIRE_FANOTIFY_INIT_FLAGS_SUPPORTED_ON_FS(fanotify_init_flags, MOUNT_PATH);
+	}
 
 	filesystem_mark_unsupported = fanotify_mark_supported_by_kernel(FAN_MARK_FILESYSTEM);
 

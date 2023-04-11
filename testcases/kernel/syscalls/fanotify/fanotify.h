@@ -10,6 +10,7 @@
 #include <sys/statfs.h>
 #include <sys/types.h>
 #include <sys/stat.h>
+#include <sys/sysmacros.h>
 #include <errno.h>
 #include "lapi/fanotify.h"
 #include "lapi/fcntl.h"
@@ -72,6 +73,10 @@ static inline int safe_fanotify_mark(const char *file, const int lineno,
 #define MAX_HANDLE_SZ		128
 #endif
 
+#ifndef FILEID_INO64
+#define FILEID_INO64		0x80
+#endif
+
 /*
  * Helper function used to obtain fsid and file_handle for a given path.
  * Used by test files correlated to FAN_REPORT_FID functionality.
@@ -80,21 +85,39 @@ static inline void fanotify_get_fid(const char *path, __kernel_fsid_t *fsid,
 				    struct file_handle *handle)
 {
 	int mount_id;
+	struct stat st;
 	struct statfs stats;
+	__u64 ino64;
 
+	if (fstatat(AT_FDCWD, path, &st, 0) == -1)
+		tst_brk(TBROK | TERRNO,
+			"statx(%s, ...) failed", path);
 	if (statfs(path, &stats) == -1)
 		tst_brk(TBROK | TERRNO,
 			"statfs(%s, ...) failed", path);
 	memcpy(fsid, &stats.f_fsid, sizeof(stats.f_fsid));
 
+	if (!fsid->val[0] && !fsid->val[1]) {
+		/* Fallback to fsid encoded from st_dev */
+		fsid->val[0] = major(st.st_dev);
+		fsid->val[1] = minor(st.st_dev);
+	}
+
 	if (name_to_handle_at(AT_FDCWD, path, handle, &mount_id, 0) == -1) {
-		if (errno == EOPNOTSUPP) {
-			tst_brk(TCONF,
-				"filesystem %s does not support file handles",
-				tst_device->fs_type);
+		if (errno != EOPNOTSUPP) {
+			tst_brk(TBROK | TERRNO,
+				"name_to_handle_at(AT_FDCWD, %s, ...) failed", path);
 		}
-		tst_brk(TBROK | TERRNO,
-			"name_to_handle_at(AT_FDCWD, %s, ...) failed", path);
+
+		tst_res(TINFO,
+			"filesystem %s does not support file handles - using ino as fid",
+			tst_device->fs_type);
+
+		/* Fallback to fid encoded from st_ino */
+		ino64 = st.st_ino;
+		handle->handle_type = FILEID_INO64;
+		handle->handle_bytes = sizeof(ino64);
+		memcpy(handle->f_handle, (void *)&ino64, sizeof(ino64));
 	}
 }
 
