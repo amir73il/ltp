@@ -25,6 +25,7 @@
 #include <sys/statfs.h>
 #include <sys/types.h>
 #include <sys/stat.h>
+#include <sys/mount.h>
 #include <errno.h>
 #include <unistd.h>
 #include "tst_test.h"
@@ -37,7 +38,7 @@
 #define DIR_ONE "dir_one"
 #define FILE_ONE "file_one"
 #define FILE_TWO "file_two"
-#define MOUNT_PATH "mntpoint"
+#define MOUNT_PATH "tstmnt"
 #define EVENT_MAX ARRAY_SIZE(objects)
 #define DIR_PATH_ONE MOUNT_PATH"/"DIR_ONE
 #define FILE_PATH_ONE MOUNT_PATH"/"FILE_ONE
@@ -88,6 +89,7 @@ static struct test_case_t {
 	}
 };
 
+static int ovl_mounted;
 static int nofid_fd;
 static int fanotify_fd;
 static int filesystem_mark_unsupported;
@@ -143,8 +145,13 @@ static void do_test(unsigned int number)
 	struct fanotify_mark_type *mark = &tc->mark;
 
 	tst_res(TINFO,
-		"Test #%d: FAN_REPORT_FID with mark flag: %s",
-		number, mark->name);
+		"Test #%d.%d: FAN_REPORT_FID with mark flag: %s",
+		number, tst_variant, mark->name);
+
+	if (tst_variant && !ovl_mounted) {
+		tst_res(TCONF, "overlayfs not supported on %s", tst_device->fs_type);
+		return;
+	}
 
 	if (filesystem_mark_unsupported && mark->flag & FAN_MARK_FILESYSTEM) {
 		tst_res(TCONF, "FAN_MARK_FILESYSTEM not supported in kernel?");
@@ -261,6 +268,13 @@ out:
 
 static void do_setup(void)
 {
+	/* Bind mount to either base fs or to overlayfs over base fs */
+	SAFE_MKDIR(MOUNT_PATH, 0755);
+	if (tst_variant)
+		ovl_mounted = TST_MOUNT_OVERLAY();
+	SAFE_MOUNT(tst_variant ? OVL_MNT : OVL_BASE_MNTPOINT, MOUNT_PATH,
+		   "none", MS_BIND, NULL);
+
 	REQUIRE_FANOTIFY_INIT_FLAGS_SUPPORTED_ON_FS(FAN_REPORT_FID, MOUNT_PATH);
 
 	filesystem_mark_unsupported = fanotify_mark_supported_by_kernel(FAN_MARK_FILESYSTEM);
@@ -287,16 +301,21 @@ static void do_cleanup(void)
 	SAFE_CLOSE(nofid_fd);
 	if (fanotify_fd > 0)
 		SAFE_CLOSE(fanotify_fd);
+	SAFE_UMOUNT(MOUNT_PATH);
+	SAFE_RMDIR(MOUNT_PATH);
+	if (ovl_mounted)
+		SAFE_UMOUNT(OVL_MNT);
 }
 
 static struct tst_test test = {
 	.test = do_test,
 	.tcnt = ARRAY_SIZE(test_cases),
+	.test_variants = 2,
 	.setup = do_setup,
 	.cleanup = do_cleanup,
 	.needs_root = 1,
 	.mount_device = 1,
-	.mntpoint = MOUNT_PATH,
+	.mntpoint = OVL_BASE_MNTPOINT,
 	.all_filesystems = 1,
 	.tags = (const struct tst_tag[]) {
 		{"linux-git", "c285a2f01d69"},
