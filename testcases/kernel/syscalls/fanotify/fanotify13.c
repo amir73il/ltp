@@ -167,6 +167,15 @@ static void do_test(unsigned int number)
 	if (setup_marks(fanotify_fd, tc) != 0)
 		goto out;
 
+	/* Variant #2: watching upper fs - open files on overlayfs */
+	if (tst_variant == 2) {
+		if (mark->flag & FAN_MARK_MOUNT) {
+			tst_res(TCONF, "overlayfs upper fs cannot be watched with mount mark");
+			goto out;
+		}
+		SAFE_MOUNT(OVL_MNT, MOUNT_PATH, "none", MS_BIND, NULL);
+	}
+
 	/* Generate sequence of FAN_OPEN events on objects */
 	for (i = 0; i < ARRAY_SIZE(objects); i++)
 		fds[i] = SAFE_OPEN(objects[i].path, O_RDONLY);
@@ -180,6 +189,9 @@ static void do_test(unsigned int number)
 		if (fds[i] > 0)
 			SAFE_CLOSE(fds[i]);
 	}
+
+	if (tst_variant == 2)
+		SAFE_UMOUNT(MOUNT_PATH);
 
 	/* Read events from event queue */
 	len = SAFE_READ(0, fanotify_fd, events_buf, BUF_SIZE);
@@ -268,12 +280,22 @@ out:
 
 static void do_setup(void)
 {
-	/* Bind mount to either base fs or to overlayfs over base fs */
-	SAFE_MKDIR(MOUNT_PATH, 0755);
-	if (tst_variant)
+	const char *mnt;
+
+	/*
+	 * Bind mount to either base fs or to overlayfs over base fs:
+	 * Variant #0: watch base fs - open files on base fs
+	 * Variant #1: watch overlayfs - open files on overlayfs
+	 * Variant #2: watch upper fs - open files on overlayfs
+	 */
+	if (tst_variant) {
 		ovl_mounted = TST_MOUNT_OVERLAY();
-	SAFE_MOUNT(tst_variant ? OVL_MNT : OVL_BASE_MNTPOINT, MOUNT_PATH,
-		   "none", MS_BIND, NULL);
+		mnt = tst_variant == 1 ? OVL_MNT : OVL_UPPER;
+	} else {
+		mnt = OVL_BASE_MNTPOINT;
+	}
+	SAFE_MKDIR(MOUNT_PATH, 0755);
+	SAFE_MOUNT(mnt, MOUNT_PATH, "none", MS_BIND, NULL);
 
 	REQUIRE_FANOTIFY_INIT_FLAGS_SUPPORTED_ON_FS(FAN_REPORT_FID, MOUNT_PATH);
 
@@ -310,7 +332,7 @@ static void do_cleanup(void)
 static struct tst_test test = {
 	.test = do_test,
 	.tcnt = ARRAY_SIZE(test_cases),
-	.test_variants = 2,
+	.test_variants = 3,
 	.setup = do_setup,
 	.cleanup = do_cleanup,
 	.needs_root = 1,
