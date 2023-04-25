@@ -81,9 +81,8 @@ static inline int safe_fanotify_mark(const char *file, const int lineno,
  * Used by test files correlated to FAN_REPORT_FID functionality.
  */
 static inline void fanotify_get_fid(const char *path, __kernel_fsid_t *fsid,
-				    struct file_handle *handle)
+				    struct file_handle *handle, int *mntid)
 {
-	int mount_id;
 	struct statfs stats;
 
 	if (statfs(path, &stats) == -1)
@@ -91,10 +90,10 @@ static inline void fanotify_get_fid(const char *path, __kernel_fsid_t *fsid,
 			"statfs(%s, ...) failed", path);
 	memcpy(fsid, &stats.f_fsid, sizeof(stats.f_fsid));
 
-	if (name_to_handle_at(AT_FDCWD, path, handle, &mount_id, 0) == -1) {
+	if (name_to_handle_at(AT_FDCWD, path, handle, mntid, 0) == -1) {
 		if (errno == EOPNOTSUPP) {
 			/* Try to request non-decodeable fid instead */
-			if (name_to_handle_at(AT_FDCWD, path, handle, &mount_id,
+			if (name_to_handle_at(AT_FDCWD, path, handle, mntid,
 					      AT_HANDLE_FID) == 0)
 				return;
 
@@ -115,6 +114,7 @@ struct fanotify_fid_t {
 	__kernel_fsid_t fsid;
 	struct file_handle handle;
 	char buf[MAX_HANDLE_SZ];
+	int mntid;
 };
 
 static inline void fanotify_save_fid(const char *path,
@@ -124,11 +124,11 @@ static inline void fanotify_save_fid(const char *path,
 
 	fh[0] = fh[1] = fh[2] = 0;
 	fid->handle.handle_bytes = MAX_HANDLE_SZ;
-	fanotify_get_fid(path, &fid->fsid, &fid->handle);
+	fanotify_get_fid(path, &fid->fsid, &fid->handle, &fid->mntid);
 
 	tst_res(TINFO,
-		"fid(%s) = %x.%x.%x.%x.%x...", path, fid->fsid.val[0],
-		fid->fsid.val[1], fh[0], fh[1], fh[2]);
+		"fid(%s) = %x.%x.%x.%x.%x..., mntid = %d", path, fid->fsid.val[0],
+		fid->fsid.val[1], fh[0], fh[1], fh[2], fid->mntid);
 }
 #endif /* HAVE_NAME_TO_HANDLE_AT */
 

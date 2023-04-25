@@ -102,6 +102,9 @@
 #ifndef FAN_OPEN_EXEC_PERM
 #define FAN_OPEN_EXEC_PERM	0x00040000
 #endif
+#ifndef FAN_UNMOUNT
+#define FAN_UNMOUNT		0x00002000	/* Filesystem unmounted */
+#endif
 #ifndef FAN_FS_ERROR
 #define FAN_FS_ERROR		0x00008000
 #endif
@@ -161,6 +164,9 @@ typedef struct {
 #endif
 #ifndef FAN_EVENT_INFO_TYPE_ERROR
 #define FAN_EVENT_INFO_TYPE_ERROR	5
+#endif
+#ifndef FAN_EVENT_INFO_TYPE_MNTID
+#define FAN_EVENT_INFO_TYPE_MNTID	6
 #endif
 
 #ifndef FAN_EVENT_INFO_TYPE_OLD_DFID_NAME

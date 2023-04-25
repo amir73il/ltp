@@ -71,6 +71,7 @@ static char event_buf[EVENT_BUF_LEN];
 
 static int fan_report_target_fid_unsupported;
 static int rename_events_unsupported;
+static int unmount_events_supported;
 
 static struct test_case_t {
 	const char *tname;
@@ -260,6 +261,7 @@ static void do_test(unsigned int number)
 	struct fanotify_group_type *group = &tc->group;
 	struct fanotify_mark_type *mark = &tc->mark;
 	struct fanotify_mark_type *sub_mark = &tc->sub_mark;
+	struct fanotify_fid_t fs_id, mnt_id;
 	struct fanotify_fid_t root_fid, dir_fid, file_fid;
 	struct fanotify_fid_t *child_fid = NULL, *subdir_fid = NULL;
 	int report_name = (group->flag & FAN_REPORT_NAME);
@@ -267,6 +269,9 @@ static void do_test(unsigned int number)
 	int report_rename = (tc->mask & FAN_RENAME);
 	int fs_mark = (mark->flag == FAN_MARK_FILESYSTEM);
 	int rename_ignored = (tc->tmpdir_ignored_mask & FAN_RENAME);
+	int report_unmount = unmount_events_supported &&
+			(group->flag & FAN_REPORT_FID) &&
+			(sub_mark->flag & FAN_MARK_MOUNT);
 
 	tst_res(TINFO, "Test #%d: %s", number, tc->tname);
 
@@ -299,6 +304,18 @@ static void do_test(unsigned int number)
 	SAFE_MKDIR(dname1, 0755);
 	SAFE_MOUNT(dname1, dname1, "none", MS_BIND, NULL);
 
+	if (report_unmount) {
+		/* Save the fsid with empty fid */
+		fanotify_save_fid(dname1, &fs_id);
+		fs_id.handle.handle_type = FILEID_INVALID;
+		fs_id.handle.handle_bytes = 0;
+		/* The MNTID info record looks like the fsid record but with mntid */
+		mnt_id.fsid.val[0] = fs_id.mntid;
+		mnt_id.fsid.val[1] = 0;
+		mnt_id.handle.handle_type = 0;
+		mnt_id.handle.handle_bytes = 0;
+	}
+
 	/* Save the subdir fid */
 	fanotify_save_fid(dname1, &dir_fid);
 	/* With FAN_REPORT_TARGET_FID, report subdir fid also for dirent events */
@@ -307,7 +324,9 @@ static void do_test(unsigned int number)
 
 	if (tc->sub_mask)
 		SAFE_FANOTIFY_MARK(fd_notify, FAN_MARK_ADD | sub_mark->flag,
-				   tc->sub_mask, AT_FDCWD, dname1);
+				   tc->sub_mask | (report_unmount ? FAN_UNMOUNT : 0),
+				   AT_FDCWD, dname1);
+
 	/*
 	 * ignore FAN_RENAME to/from tmpdir, so we won't get the FAN_RENAME events
 	 * when subdir is moved via tmpdir.
@@ -455,6 +474,15 @@ static void do_test(unsigned int number)
 	strcpy(event_set[tst_count].name, ".");
 	tst_count++;
 
+	/* Verify FAN_UNMOUNT event if supported */
+	if (report_unmount) {
+		event_set[tst_count].mask = FAN_UNMOUNT;
+		event_set[tst_count].fid = &fs_id;
+		strcpy(event_set[tst_count].name, "");
+		event_set[tst_count].child_fid = &mnt_id;
+		tst_count++;
+	}
+
 	/*
 	 * If only root dir and subdir are watched, a rename via an unwatched tmpdir
 	 * will observe the same MOVED_FROM/MOVED_TO events as a direct rename,
@@ -530,7 +558,8 @@ static void do_test(unsigned int number)
 		struct fanotify_fid_t *expected_fid = expected->fid;
 		struct fanotify_fid_t *expected_child_fid = expected->child_fid;
 		struct file_handle *file_handle;
-		unsigned int fhlen;
+		unsigned int fhlen, expected_fhlen;
+		int expected_fhtype, fsidlen = sizeof(event_fid->fsid);
 		const char *filename;
 		int namelen, info_type, mask_match, info_id = 0;
 
@@ -570,7 +599,7 @@ static void do_test(unsigned int number)
 			info_type = FAN_EVENT_INFO_TYPE_DFID_NAME;
 		} else if (expected->mask & FAN_ONDIR) {
 			info_type = FAN_EVENT_INFO_TYPE_DFID;
-		} else if (expected->mask & (FAN_DELETE_SELF | FAN_MOVE_SELF)) {
+		} else if (!fhlen || expected->mask & (FAN_DELETE_SELF | FAN_MOVE_SELF)) {
 			/* Self event on non-dir has only child fid */
 			info_type = FAN_EVENT_INFO_TYPE_FID;
 		} else {
@@ -588,6 +617,8 @@ static void do_test(unsigned int number)
 			      !((event->mask ^ expected->mask) & FAN_ONDIR));
 
 check_match:
+		expected_fhlen = expected_fid->handle.handle_bytes;
+		expected_fhtype = expected_fid->handle.handle_type;
 		if (test_num >= tst_count) {
 			tst_res(TFAIL,
 				"got unnecessary event: mask=%llx "
@@ -595,14 +626,6 @@ check_match:
 				"len=%d info_type=%d info_len=%d fh_len=%d",
 				(unsigned long long)event->mask,
 				(unsigned int)event->pid, event->fd, filename,
-				event->event_len, event_fid->hdr.info_type,
-				event_fid->hdr.len, fhlen);
-		} else if (!fhlen || namelen < 0) {
-			tst_res(TFAIL,
-				"got event without fid: mask=%llx pid=%u fd=%d, "
-				"len=%d info_type=%d info_len=%d fh_len=%d",
-				(unsigned long long)event->mask,
-				(unsigned int)event->pid, event->fd,
 				event->event_len, event_fid->hdr.info_type,
 				event_fid->hdr.len, fhlen);
 		} else if (!mask_match) {
@@ -622,7 +645,7 @@ check_match:
 				(unsigned int)event->pid, event->fd,
 				event->event_len, event_fid->hdr.info_type,
 				info_type, event_fid->hdr.len, fhlen);
-		} else if (fhlen != expected_fid->handle.handle_bytes) {
+		} else if (expected_fhlen && fhlen != expected_fhlen) {
 			tst_res(TFAIL,
 				"got event: mask=%llx pid=%u fd=%d name='%s' "
 				"len=%d info_type=%d info_len=%d fh_len=%d expected(%d) "
@@ -630,11 +653,10 @@ check_match:
 				(unsigned long long)event->mask,
 				(unsigned int)event->pid, event->fd, filename,
 				event->event_len, info_type,
-				event_fid->hdr.len, fhlen,
-				expected_fid->handle.handle_bytes,
+				event_fid->hdr.len, fhlen, expected_fhlen,
 				file_handle->handle_type);
-		} else if (file_handle->handle_type !=
-			   expected_fid->handle.handle_type) {
+		} else if (expected_fhtype &&
+			   expected_fhtype != file_handle->handle_type) {
 			tst_res(TFAIL,
 				"got event: mask=%llx pid=%u fd=%d name='%s' "
 				"len=%d info_type=%d info_len=%d fh_len=%d "
@@ -643,9 +665,9 @@ check_match:
 				(unsigned int)event->pid, event->fd, filename,
 				event->event_len, info_type,
 				event_fid->hdr.len, fhlen,
-				file_handle->handle_type,
-				expected_fid->handle.handle_type);
-		} else if (memcmp(file_handle->f_handle,
+				file_handle->handle_type, expected_fhtype);
+		} else if (expected_fhlen &&
+			   memcmp(file_handle->f_handle,
 				  expected_fid->handle.f_handle, fhlen)) {
 			tst_res(TFAIL,
 				"got event: mask=%llx pid=%u fd=%d name='%s' "
@@ -657,8 +679,7 @@ check_match:
 				event_fid->hdr.len, fhlen,
 				file_handle->handle_type,
 				*(int *)(file_handle->f_handle));
-		} else if (memcmp(&event_fid->fsid, &expected_fid->fsid,
-				  sizeof(event_fid->fsid)) != 0) {
+		} else if (memcmp(&event_fid->fsid, &expected_fid->fsid, fsidlen)) {
 			tst_res(TFAIL,
 				"got event: mask=%llx pid=%u fd=%d name='%s' "
 				"len=%d info_type=%d info_len=%d fh_len=%d "
@@ -714,12 +735,17 @@ check_match:
 			info_id = 1;
 			info_type = FAN_EVENT_INFO_TYPE_FID;
 			/*
+			 * With FAN_UNMOUNT event, expect a second record of
+			 * type MNTID with 4 bytes mntid.
 			 * With FAN_RENAME event, expect a second record of
 			 * type NEW_DFID_NAME, which in our case
 			 * has the same fid as the source dir in 1st record.
 			 * TODO: check the 2nd name and the 3rd child fid record.
 			 */
-			if (event->mask & FAN_RENAME && expected->name2[0]) {
+			if (event->mask & FAN_UNMOUNT) {
+				info_type = FAN_EVENT_INFO_TYPE_MNTID;
+				fsidlen = 4;
+			} else if (event->mask & FAN_RENAME && expected->name2[0]) {
 				info_type = FAN_EVENT_INFO_TYPE_NEW_DFID_NAME;
 				expected_fid = expected->fid;
 			}
@@ -767,6 +793,8 @@ static void setup(void)
 		fanotify_init_flags_supported_on_fs(FAN_REPORT_DFID_NAME_TARGET, MOUNT_PATH);
 	rename_events_unsupported =
 		fanotify_events_supported_by_kernel(FAN_RENAME, FAN_REPORT_DFID_NAME, 0);
+	unmount_events_supported =
+		!fanotify_events_supported_by_kernel(FAN_UNMOUNT, FAN_REPORT_FID, FAN_MARK_MOUNT);
 
 	SAFE_MKDIR(TEMP_DIR, 0755);
 	sprintf(dname1, "%s/%s", MOUNT_PATH, DIR_NAME1);
