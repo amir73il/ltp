@@ -50,6 +50,7 @@ static pid_t child_pid;
 
 static char event_buf[EVENT_BUF_LEN];
 static int exec_events_unsupported;
+static int pre_content_events_unsupported;
 static int filesystem_mark_unsupported;
 
 struct event {
@@ -121,12 +122,28 @@ static struct tcase {
 			{FAN_OPEN_EXEC_PERM, FAN_DENY}
 		}
 	},
+	{
+		"inode mark, FAN_PRE_ACCESS | FAN_OPEN_EXEC_PERM events",
+		INIT_FANOTIFY_MARK_TYPE(INODE),
+		FAN_PRE_ACCESS | FAN_OPEN_EXEC_PERM, 2,
+		{
+			{FAN_PRE_ACCESS, FAN_DENY_ERRNO(EBUSY)},
+			{FAN_OPEN_EXEC_PERM, FAN_DENY_ERRNO(ETXTBSY)}
+		}
+	},
 };
 
-static void generate_events(void)
+static void generate_events(struct tcase *tc)
 {
 	int fd;
 	char *const argv[] = {FILE_EXEC_PATH, NULL};
+	struct event* event = tc->event_set;
+	int exp_errno = EPERM;
+	/* Test FAN_DENY_ERRNO() when pre-content events are supported */
+	int deny_errno = (event->mask == FAN_PRE_ACCESS);
+
+	if (event->mask == FAN_OPEN_PERM)
+		event++;
 
 	/*
 	 * Generate sequence of events
@@ -136,13 +153,27 @@ static void generate_events(void)
 	SAFE_WRITE(SAFE_WRITE_ANY, fd, fname, 1);
 	SAFE_LSEEK(fd, 0, SEEK_SET);
 
-	if (read(fd, buf, BUF_SIZE) != -1)
+	if (deny_errno) {
+		exp_errno = FAN_RESPONSE_ERRNO(event->response);
+		event++;
+	}
+
+	if (read(fd, buf, BUF_SIZE) != -1 || errno != exp_errno) {
+		tst_res(TFAIL, "read() got errno %d (expected %d)", errno, exp_errno);
 		exit(3);
+	}
 
 	SAFE_CLOSE(fd);
 
-	if (execve(FILE_EXEC_PATH, argv, environ) != -1)
+	if (deny_errno) {
+		exp_errno = FAN_RESPONSE_ERRNO(event->response);
+		event++;
+	}
+
+	if (execve(FILE_EXEC_PATH, argv, environ) != -1 || errno != exp_errno) {
+		tst_res(TFAIL, "execve() got errno %d (expected %d)", errno, exp_errno);
 		exit(5);
+	}
 }
 
 static void child_handler(int tmp)
@@ -156,7 +187,7 @@ static void child_handler(int tmp)
 	fd_notify = -1;
 }
 
-static void run_child(void)
+static void run_child(struct tcase *tc)
 {
 	struct sigaction child_action;
 
@@ -174,7 +205,7 @@ static void run_child(void)
 	if (child_pid == 0) {
 		/* Child will generate events now */
 		SAFE_CLOSE(fd_notify);
-		generate_events();
+		generate_events(tc);
 		exit(0);
 	}
 }
@@ -213,12 +244,17 @@ static int setup_mark(unsigned int n)
 		return -1;
 	}
 
+	if (pre_content_events_unsupported && tc->mask & FAN_PRE_ACCESS) {
+		tst_res(TCONF, "FAN_PRE_ACCESS not supported in kernel?");
+		return -1;
+	}
+
 	if (filesystem_mark_unsupported && mark->flag == FAN_MARK_FILESYSTEM) {
 		tst_res(TCONF, "FAN_MARK_FILESYSTEM not supported in kernel?");
 		return -1;
 	}
 
-	fd_notify = SAFE_FANOTIFY_INIT(FAN_CLASS_CONTENT, O_RDONLY);
+	fd_notify = SAFE_FANOTIFY_INIT(FAN_CLASS_PRE_CONTENT, O_RDONLY);
 
 	for (; i < ARRAY_SIZE(files); i++) {
 		SAFE_FANOTIFY_MARK(fd_notify, FAN_MARK_ADD | mark->flag,
@@ -237,7 +273,7 @@ static void test_fanotify(unsigned int n)
 	if (setup_mark(n) != 0)
 		return;
 
-	run_child();
+	run_child(tc);
 
 	/*
 	 * Process events
@@ -290,12 +326,14 @@ static void test_fanotify(unsigned int n)
 		}
 
 		/* Write response to the permission event */
-		if (event_set[test_num].mask & LTP_ALL_PERM_EVENTS) {
+		if (event_set[test_num].mask &
+			(LTP_ALL_PERM_EVENTS | LTP_PRE_CONTENT_EVENTS)) {
 			struct fanotify_response resp;
 
 			resp.fd = event->fd;
 			resp.response = event_set[test_num].response;
 			SAFE_WRITE(SAFE_WRITE_ALL, fd_notify, &resp, sizeof(resp));
+			tst_res(TPASS, "response=%x fd=%d\n", resp.response, resp.fd);
 		}
 
 		i += event->event_len;
@@ -327,6 +365,12 @@ static void setup(void)
 	filesystem_mark_unsupported = fanotify_mark_supported_on_fs(FAN_MARK_FILESYSTEM, fname);
 	exec_events_unsupported = fanotify_flags_supported_on_fs(FAN_CLASS_CONTENT,
 					0, FAN_OPEN_EXEC_PERM, fname);
+	/*
+	 * We test for FAN_PRE_ACCESS support which is easier than testing for FAN_DENY_ERRNO
+	 * support, but the two features are expected to be merged together.
+	 */
+	pre_content_events_unsupported = fanotify_flags_supported_on_fs(FAN_CLASS_PRE_CONTENT,
+					0, FAN_PRE_ACCESS, fname);
 
 	SAFE_CP(TEST_APP, FILE_EXEC_PATH);
 }
