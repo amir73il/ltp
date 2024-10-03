@@ -80,6 +80,12 @@ static struct test_case_t {
 		.expected_errno = EINVAL,
 	},
 
+	/* FAN_REPORT_FID with FAN_REPORT_FD_ERROR is not valid */
+	{
+		.init = FLAGS_DESC(FAN_REPORT_FD_ERROR | FAN_REPORT_FID),
+		.expected_errno = EINVAL,
+	},
+
 	/* INODE_EVENTS in mask without class FAN_REPORT_FID are not valid */
 	{
 		.init = FLAGS_DESC(FAN_CLASS_NOTIF),
@@ -319,7 +325,7 @@ out:
 
 static void do_setup(void)
 {
-	unsigned int all_init_flags = FAN_REPORT_DFID_NAME_TARGET |
+	unsigned int all_init_flags = FAN_REPORT_DFID_NAME_TARGET | FAN_REPORT_FD_ERROR |
 		FAN_CLASS_NOTIF | FAN_CLASS_CONTENT | FAN_CLASS_PRE_CONTENT;
 
 	/* Require FAN_REPORT_FID support for all tests to simplify per test case requirements */
