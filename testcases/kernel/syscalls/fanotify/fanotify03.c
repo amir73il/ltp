@@ -132,6 +132,39 @@ static struct tcase {
 			{FAN_OPEN_EXEC_PERM, FAN_DENY_ERRNO(ETXTBSY)}
 		}
 	},
+	{
+		"parent watching children, FAN_ACCESS_PERM | FAN_OPEN_EXEC_PERM events",
+		INIT_FANOTIFY_MARK_TYPE(PARENT),
+		FAN_ACCESS_PERM | FAN_OPEN_EXEC_PERM | FAN_EVENT_ON_CHILD, 2,
+		{
+			{FAN_ACCESS_PERM, FAN_DENY},
+			{FAN_OPEN_EXEC_PERM, FAN_DENY}
+		}
+	},
+	{
+		"parent not watching children, FAN_ACCESS_PERM | FAN_OPEN_EXEC_PERM events",
+		INIT_FANOTIFY_MARK_TYPE(PARENT),
+		FAN_ACCESS_PERM | FAN_OPEN_EXEC_PERM, 0,
+		{
+		}
+	},
+	{
+		"parent watching children, FAN_PRE_ACCESS | FAN_OPEN_EXEC_PERM events",
+		INIT_FANOTIFY_MARK_TYPE(PARENT),
+		FAN_PRE_ACCESS | FAN_OPEN_EXEC_PERM | FAN_EVENT_ON_CHILD, 3,
+		{
+			{FAN_PRE_ACCESS, FAN_DENY},
+			{FAN_PRE_ACCESS, FAN_DENY},
+			{FAN_OPEN_EXEC_PERM, FAN_DENY}
+		}
+	},
+	{
+		"parent not watching children, FAN_PRE_ACCESS | FAN_OPEN_EXEC_PERM events",
+		INIT_FANOTIFY_MARK_TYPE(PARENT),
+		FAN_PRE_ACCESS | FAN_OPEN_EXEC_PERM, 0,
+		{
+		}
+	},
 };
 
 static int expected_errno(unsigned int response)
@@ -285,6 +318,12 @@ static int setup_mark(unsigned int n)
 	}
 
 	fd_notify = SAFE_FANOTIFY_INIT(FAN_CLASS_PRE_CONTENT, O_RDONLY);
+
+	if (mark->flag == FAN_MARK_PARENT) {
+		SAFE_FANOTIFY_MARK(fd_notify, FAN_MARK_ADD | mark->flag,
+				   tc->mask, AT_FDCWD, MOUNT_PATH);
+		return 0;
+	}
 
 	for (; i < ARRAY_SIZE(files); i++) {
 		SAFE_FANOTIFY_MARK(fd_notify, FAN_MARK_ADD | mark->flag,
