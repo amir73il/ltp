@@ -375,8 +375,9 @@ static void setup(void)
 	}
 
 	if (fanotify_flags_supported_on_fs(FAN_REPORT_FID, FAN_MARK_MOUNT, FAN_OPEN, ".")) {
-		inode_mark_fid_xdev = errno;
-		tst_res(TINFO, "TMPDIR does not support reporting events with fid from multi fs");
+		inode_mark_fid_xdev = (errno == ENODEV) ? EXDEV : errno;
+		tst_res(TINFO, "TMPDIR does not support reporting events with fid from multi fs"
+				" (errno = %d)", errno);
 	}
 }
 
