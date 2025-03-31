@@ -190,16 +190,18 @@ static void generate_events(struct tcase *tc)
 	 */
 	fd = SAFE_OPEN(fname, O_RDWR | O_CREAT, 0700);
 
-	exp_errno = expected_errno(event->response);
-	event++;
-
+	exp_errno = 0;
+	if (event->mask & FAN_PRE_ACCESS) {
+		exp_errno = expected_errno(event->response);
+		event++;
+	}
 	exp_ret = exp_errno ? -1 : 1;
-	errno = 0;
 	/*
 	 * FAN_PRE_ACCESS events are reported on map() and write(), but should
 	 * not be reported when faulting in the user page at offset page_sz*100
 	 * that is used as an input buffer to the write() syscall.
 	 */
+	errno = 0;
 	addr = SAFE_MMAP(NULL, page_sz, PROT_READ, MAP_PRIVATE, fd, page_sz*100);
 	if (!addr || errno != exp_errno) {
 		tst_res(TFAIL, "mmap() got errno %d (expected %d)", errno, exp_errno);
@@ -208,9 +210,11 @@ static void generate_events(struct tcase *tc)
 		tst_res(TINFO, "mmap() got errno %d as expected", errno);
 	}
 
-	exp_errno = expected_errno(event->response);
-	event++;
-
+	exp_errno = 0;
+	if (event->mask & FAN_PRE_ACCESS) {
+		exp_errno = expected_errno(event->response);
+		event++;
+	}
 	exp_ret = exp_errno ? -1 : 1;
 	errno = 0;
 	if (write(fd, addr, 1) != exp_ret || errno != exp_errno) {
@@ -222,9 +226,11 @@ static void generate_events(struct tcase *tc)
 
 	SAFE_LSEEK(fd, 0, SEEK_SET);
 
-	exp_errno = expected_errno(event->response);
-	event++;
-
+	exp_errno = 0;
+	if (event->mask & FAN_PRE_ACCESS) {
+		exp_errno = expected_errno(event->response);
+		event++;
+	}
 	exp_ret = exp_errno ? -1 : BUF_SIZE;
 	errno = 0;
 	if (read(fd, buf, BUF_SIZE) != exp_ret || errno != exp_errno) {
@@ -236,9 +242,11 @@ static void generate_events(struct tcase *tc)
 
 	SAFE_CLOSE(fd);
 
-	exp_errno = expected_errno(event->response);
-	event++;
-
+	exp_errno = 0;
+	if (event->mask & (FAN_OPEN_PERM | FAN_OPEN_EXEC_PERM)) {
+		exp_errno = expected_errno(event->response);
+		event++;
+	}
 	/*
 	 * If execve() is allowed by permission events, check if executing a
 	 * file that open for write is allowed.
