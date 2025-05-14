@@ -43,12 +43,15 @@
 #define MOUNT_PATH "fs_mnt"
 #define FILE_EXEC_PATH MOUNT_PATH"/"TEST_APP
 
+static char notfound[BUF_SIZE];
 static char fname[BUF_SIZE];
 static char buf[BUF_SIZE];
 static volatile int fd_notify;
 static size_t page_sz;
 
 static pid_t child_pid;
+
+static int pre_dir_access_unsupported;
 
 static char event_buf[EVENT_BUF_LEN];
 
@@ -110,6 +113,19 @@ static struct tcase {
 		}
 	},
 	{
+		"mount mark, FAN_PATH_ACCESS | FAN_PRE_ACCESS | FAN_OPEN_EXEC_PERM events",
+		INIT_FANOTIFY_MARK_TYPE(MOUNT),
+		FAN_PATH_ACCESS | FAN_PRE_ACCESS | FAN_ONDIR | FAN_OPEN_EXEC_PERM,
+		{
+			{FAN_PATH_ACCESS, FAN_ALLOW},
+			{FAN_PRE_ACCESS | FAN_ONDIR, FAN_ALLOW},
+			{FAN_PRE_ACCESS, FAN_ALLOW},
+			{FAN_PRE_ACCESS, FAN_DENY},
+			{FAN_PRE_ACCESS, FAN_DENY_ERRNO(EIO)},
+			{FAN_OPEN_EXEC_PERM, FAN_DENY_ERRNO(EBUSY)}
+		}
+	},
+	{
 		"filesystem mark, FAN_OPEN_PERM | FAN_PRE_ACCESS events",
 		INIT_FANOTIFY_MARK_TYPE(FILESYSTEM),
 		FAN_OPEN_PERM | FAN_PRE_ACCESS,
@@ -133,6 +149,19 @@ static struct tcase {
 		}
 	},
 	{
+		"filesystem mark, FAN_PATH_ACCESS | FAN_PRE_ACCESS | FAN_OPEN_EXEC_PERM events",
+		INIT_FANOTIFY_MARK_TYPE(FILESYSTEM),
+		FAN_PATH_ACCESS | FAN_PRE_ACCESS | FAN_ONDIR | FAN_OPEN_EXEC_PERM,
+		{
+			{FAN_PATH_ACCESS, FAN_ALLOW},
+			{FAN_PRE_ACCESS | FAN_ONDIR, FAN_ALLOW},
+			{FAN_PRE_ACCESS, FAN_ALLOW},
+			{FAN_PRE_ACCESS, FAN_DENY},
+			{FAN_PRE_ACCESS, FAN_DENY_ERRNO(EIO)},
+			{FAN_OPEN_EXEC_PERM, FAN_DENY_ERRNO(EBUSY)}
+		}
+	},
+	{
 		"parent watching children, FAN_PRE_ACCESS | FAN_OPEN_EXEC_PERM events",
 		INIT_FANOTIFY_MARK_TYPE(PARENT),
 		FAN_PRE_ACCESS | FAN_OPEN_EXEC_PERM | FAN_EVENT_ON_CHILD,
@@ -141,6 +170,28 @@ static struct tcase {
 			{FAN_PRE_ACCESS, FAN_DENY},
 			{FAN_PRE_ACCESS, FAN_DENY},
 			{FAN_OPEN_EXEC_PERM, FAN_DENY}
+		}
+	},
+	{
+		"parent watching children and self, FAN_PATH_ACCESS | FAN_PRE_ACCESS | FAN_OPEN_EXEC_PERM events",
+		INIT_FANOTIFY_MARK_TYPE(PARENT),
+		FAN_PATH_ACCESS | FAN_PRE_ACCESS | FAN_ONDIR | FAN_OPEN_EXEC_PERM | FAN_EVENT_ON_CHILD,
+		{
+			{FAN_PATH_ACCESS, FAN_ALLOW},
+			{FAN_PRE_ACCESS | FAN_ONDIR, FAN_ALLOW},
+			{FAN_PRE_ACCESS, FAN_ALLOW},
+			{FAN_PRE_ACCESS, FAN_DENY},
+			{FAN_PRE_ACCESS, FAN_DENY},
+			{FAN_OPEN_EXEC_PERM, FAN_DENY}
+		}
+	},
+	{
+		"parent watching only itself, FAN_PATH_ACCESS | FAN_PRE_ACCESS | FAN_OPEN_EXEC_PERM events",
+		INIT_FANOTIFY_MARK_TYPE(PARENT),
+		FAN_PATH_ACCESS | FAN_PRE_ACCESS | FAN_ONDIR | FAN_OPEN_EXEC_PERM,
+		{
+			{FAN_PATH_ACCESS, FAN_ALLOW},
+			{FAN_PRE_ACCESS | FAN_ONDIR, FAN_ALLOW},
 		}
 	},
 	{
@@ -181,6 +232,23 @@ static void generate_events(struct tcase *tc)
 	char *const argv[] = {FILE_EXEC_PATH, NULL};
 	struct event *event = tc->event_set;
 	int exp_ret, exp_errno = 0;
+
+	if (tc->mask & FAN_ONDIR) {
+		DIR *dir;
+
+		// Lookup a unique name each test case to avoid negative cached
+		// lookup result and generate FAN_PATH_ACCESS
+		event++;
+		sprintf(notfound, MOUNT_PATH"/notfound_%d", (int)(tc - tcases));
+		TST_EXP_FAIL(faccessat(AT_FDCWD, notfound, F_OK, 0),
+			     ENOENT, "faccessat(%s)", notfound);
+
+		// Generate FAN_PRE_ACCESS | FAN_ONDIR
+		event++;
+		dir = SAFE_OPENDIR(MOUNT_PATH);
+		SAFE_READDIR(dir);
+		SAFE_CLOSEDIR(dir);
+	}
 
 	if (event->mask == FAN_OPEN_PERM)
 		event++;
@@ -256,7 +324,7 @@ static void generate_events(struct tcase *tc)
 	 * Therefore, ETXTBSY is to be expected when file is not being watched
 	 * at all or being watched but not with pre-content events in mask.
 	 */
-	if (!exp_errno) {
+	if (!exp_errno && !(tc->mask & FAN_ONDIR)) {
 		fd = SAFE_OPEN(FILE_EXEC_PATH, O_RDWR);
 		if (!tc->event_set[0].mask)
 			exp_errno = ETXTBSY;
@@ -335,10 +403,20 @@ static int setup_mark(unsigned int n)
 	struct tcase *tc = &tcases[n];
 	struct fanotify_mark_type *mark = &tc->mark;
 	char *const files[] = {fname, FILE_EXEC_PATH};
+	unsigned int event_f_flags = O_RDONLY;
 
 	tst_res(TINFO, "Test #%d: %s", n, tc->tname);
 
-	fd_notify = SAFE_FANOTIFY_INIT(FAN_CLASS_PRE_CONTENT, O_RDONLY);
+	if (tc->mask & FAN_ONDIR) {
+		if (pre_dir_access_unsupported) {
+			tst_res(TCONF, "pre-content events on dir not supported in kernel?");
+			return -1;
+		}
+		/* Get O_PATH fds for directory pre-content events */
+		event_f_flags = O_PATH;
+	}
+
+	fd_notify = SAFE_FANOTIFY_INIT(FAN_CLASS_PRE_CONTENT, event_f_flags);
 
 	if (mark->flag == FAN_MARK_PARENT) {
 		SAFE_FANOTIFY_MARK(fd_notify, FAN_MARK_ADD | mark->flag,
@@ -422,7 +500,8 @@ static void test_fanotify(unsigned int n)
 				(unsigned int)event->pid,
 				(unsigned int)child_pid,
 				event->fd);
-		} else if (event->mask & LTP_PRE_CONTENT_EVENTS) {
+		} else if (event->mask & LTP_PRE_CONTENT_EVENTS &&
+			   !(event->mask & (FAN_PATH_ACCESS | FAN_ONDIR))) {
 			if (event->event_len < sizeof(*event) + sizeof(*range) ||
 			    range->hdr.info_type != FAN_EVENT_INFO_TYPE_RANGE) {
 				tst_res(TFAIL,
@@ -463,8 +542,19 @@ static void test_fanotify(unsigned int n)
 		if (event->fd != FAN_NOFD) {
 			char c;
 
-			/* Verify that read from event fd does not generate events */
-			SAFE_READ(0, event->fd, &c, 1);
+			if (!(tc->mask & FAN_ONDIR)) {
+				/* Verify that read from event fd does not generate events */
+				SAFE_READ(0, event->fd, &c, 1);
+			} else if (event->mask & FAN_ONDIR) {
+				/*
+				 * Verify that lookup with a directory event fd does not
+				 * generate FAN_PATH_ACCESS events.
+				 */
+				sprintf(notfound, "nonotify_%d", (int)(tc - tcases));
+				TST_EXP_FAIL(faccessat(event->fd, notfound, F_OK, 0),
+					     ENOENT, "faccessat(%d, %s)",
+					     event->fd, notfound);
+			}
 			SAFE_CLOSE(event->fd);
 		}
 
@@ -493,6 +583,8 @@ static void setup(void)
 
 	REQUIRE_FANOTIFY_EVENTS_SUPPORTED_ON_FS(FAN_CLASS_PRE_CONTENT, FAN_MARK_FILESYSTEM,
 						FAN_PRE_ACCESS, fname);
+	pre_dir_access_unsupported = fanotify_flags_supported_on_fs(FAN_CLASS_PRE_CONTENT,
+						0, FAN_PATH_ACCESS | FAN_PRE_ACCESS | FAN_ONDIR, fname);
 
 	SAFE_CP(TEST_APP, FILE_EXEC_PATH);
 }
