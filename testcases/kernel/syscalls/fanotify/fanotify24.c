@@ -133,6 +133,18 @@ static struct tcase {
 		}
 	},
 	{
+		"parent watching children and self, FAN_OPEN_PERM | FAN_PRE_ACCESS events",
+		INIT_FANOTIFY_MARK_TYPE(PARENT),
+		FAN_PRE_ACCESS | FAN_OPEN_EXEC_PERM | FAN_EVENT_ON_CHILD | FAN_ONDIR,
+		{
+			{FAN_PRE_ACCESS | FAN_ONDIR, FAN_ALLOW},
+			{FAN_PRE_ACCESS, FAN_ALLOW},
+			{FAN_PRE_ACCESS, FAN_DENY},
+			{FAN_PRE_ACCESS, FAN_DENY},
+			{FAN_OPEN_EXEC_PERM, FAN_DENY}
+		}
+	},
+	{
 		"parent watching children, FAN_PRE_ACCESS | FAN_OPEN_EXEC_PERM events",
 		INIT_FANOTIFY_MARK_TYPE(PARENT),
 		FAN_PRE_ACCESS | FAN_OPEN_EXEC_PERM | FAN_EVENT_ON_CHILD,
@@ -141,6 +153,15 @@ static struct tcase {
 			{FAN_PRE_ACCESS, FAN_DENY},
 			{FAN_PRE_ACCESS, FAN_DENY},
 			{FAN_OPEN_EXEC_PERM, FAN_DENY}
+		}
+	},
+	{
+		"parent watching only itself, FAN_OPEN_PERM | FAN_PRE_ACCESS events",
+		INIT_FANOTIFY_MARK_TYPE(PARENT),
+		FAN_PRE_ACCESS | FAN_OPEN_EXEC_PERM | FAN_ONDIR,
+		{
+			/* This allows multiple FAN_PRE_ACCESS events on readdir */
+			{FAN_PRE_ACCESS | FAN_ONDIR, FAN_ALLOW},
 		}
 	},
 	{
@@ -181,6 +202,14 @@ static void generate_events(struct tcase *tc)
 	char *const argv[] = {FILE_EXEC_PATH, NULL};
 	struct event *event = tc->event_set;
 	int exp_ret, exp_errno = 0;
+	DIR *dir;
+
+	if (event->mask & FAN_ONDIR) {
+		event++;
+		dir = SAFE_OPENDIR(MOUNT_PATH);
+		SAFE_READDIR(dir);
+		SAFE_CLOSEDIR(dir);
+	}
 
 	if (event->mask == FAN_OPEN_PERM)
 		event++;
@@ -256,7 +285,7 @@ static void generate_events(struct tcase *tc)
 	 * Therefore, ETXTBSY is to be expected when file is not being watched
 	 * at all or being watched but not with pre-content events in mask.
 	 */
-	if (!exp_errno) {
+	if (!exp_errno && !(tc->mask & FAN_ONDIR)) {
 		fd = SAFE_OPEN(FILE_EXEC_PATH, O_RDWR);
 		if (!tc->event_set[0].mask)
 			exp_errno = ETXTBSY;
@@ -422,7 +451,8 @@ static void test_fanotify(unsigned int n)
 				(unsigned int)event->pid,
 				(unsigned int)child_pid,
 				event->fd);
-		} else if (event->mask & LTP_PRE_CONTENT_EVENTS) {
+		} else if (event->mask & LTP_PRE_CONTENT_EVENTS &&
+			   !(event->mask & FAN_ONDIR)) {
 			if (event->event_len < sizeof(*event) + sizeof(*range) ||
 			    range->hdr.info_type != FAN_EVENT_INFO_TYPE_RANGE) {
 				tst_res(TFAIL,
@@ -460,7 +490,7 @@ static void test_fanotify(unsigned int n)
 
 		i += event->event_len;
 
-		if (event->fd != FAN_NOFD) {
+		if (event->fd != FAN_NOFD && !(event->mask & FAN_ONDIR)) {
 			char c;
 
 			/* Verify that read from event fd does not generate events */
@@ -492,7 +522,7 @@ static void setup(void)
 	SAFE_TRUNCATE(fname, page_sz*101);
 
 	REQUIRE_FANOTIFY_EVENTS_SUPPORTED_ON_FS(FAN_CLASS_PRE_CONTENT, FAN_MARK_FILESYSTEM,
-						FAN_PRE_ACCESS, fname);
+						FAN_PRE_ACCESS | FAN_ONDIR, fname);
 
 	SAFE_CP(TEST_APP, FILE_EXEC_PATH);
 }
