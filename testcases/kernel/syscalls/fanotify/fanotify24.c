@@ -64,13 +64,13 @@ static struct tcase {
 	struct event event_set[EVENT_SET_MAX];
 } tcases[] = {
 	{
-		"inode mark, FAN_OPEN_PERM | FAN_PRE_ACCESS events",
+		"inode mark, FAN_OPEN_PERM | FAN_PRE_ACCESS | FAN_PRE_MODIFY events",
 		INIT_FANOTIFY_MARK_TYPE(INODE),
-		FAN_OPEN_PERM | FAN_PRE_ACCESS,
+		FAN_OPEN_PERM | FAN_PRE_ACCESS | FAN_PRE_MODIFY,
 		{
 			{FAN_OPEN_PERM, FAN_ALLOW},
 			{FAN_PRE_ACCESS, FAN_ALLOW},
-			{FAN_PRE_ACCESS, FAN_ALLOW},
+			{FAN_PRE_ACCESS | FAN_PRE_MODIFY, FAN_ALLOW},
 			{FAN_PRE_ACCESS, FAN_DENY_ERRNO(EIO)},
 			{FAN_OPEN_PERM, FAN_DENY_ERRNO(EBUSY)}
 		}
@@ -87,13 +87,13 @@ static struct tcase {
 		}
 	},
 	{
-		"mount mark, FAN_OPEN_PERM | FAN_PRE_ACCESS events",
+		"mount mark, FAN_OPEN_PERM | FAN_PRE_ACCESS | FAN_PRE_MODIFY events",
 		INIT_FANOTIFY_MARK_TYPE(MOUNT),
-		FAN_OPEN_PERM | FAN_PRE_ACCESS,
+		FAN_OPEN_PERM | FAN_PRE_ACCESS | FAN_PRE_MODIFY,
 		{
 			{FAN_OPEN_PERM, FAN_ALLOW},
 			{FAN_PRE_ACCESS, FAN_ALLOW},
-			{FAN_PRE_ACCESS, FAN_ALLOW},
+			{FAN_PRE_ACCESS | FAN_PRE_MODIFY, FAN_ALLOW},
 			{FAN_PRE_ACCESS, FAN_DENY_ERRNO(EIO)},
 			{FAN_OPEN_PERM, FAN_DENY_ERRNO(EBUSY)}
 		}
@@ -110,13 +110,13 @@ static struct tcase {
 		}
 	},
 	{
-		"filesystem mark, FAN_OPEN_PERM | FAN_PRE_ACCESS events",
+		"filesystem mark, FAN_OPEN_PERM | FAN_PRE_ACCESS | FAN_PRE_MODIFY events",
 		INIT_FANOTIFY_MARK_TYPE(FILESYSTEM),
-		FAN_OPEN_PERM | FAN_PRE_ACCESS,
+		FAN_OPEN_PERM | FAN_PRE_ACCESS | FAN_PRE_MODIFY,
 		{
 			{FAN_OPEN_PERM, FAN_ALLOW},
 			{FAN_PRE_ACCESS, FAN_ALLOW},
-			{FAN_PRE_ACCESS, FAN_ALLOW},
+			{FAN_PRE_ACCESS | FAN_PRE_MODIFY, FAN_ALLOW},
 			{FAN_PRE_ACCESS, FAN_DENY_ERRNO(EIO)},
 			{FAN_OPEN_PERM, FAN_DENY_ERRNO(EBUSY)}
 		}
@@ -180,6 +180,16 @@ static struct tcase {
 			{FAN_PRE_ACCESS, FAN_ALLOW},
 		}
 	},
+	{
+		"inode mark, FAN_PRE_MODIFY | FAN_OPEN_EXEC_PERM events",
+		INIT_FANOTIFY_MARK_TYPE(INODE),
+		FAN_OPEN_EXEC_PERM | FAN_PRE_MODIFY,
+		{
+			/* Only write(2) generates a pre-modify event */
+			{FAN_PRE_MODIFY, FAN_DENY_ERRNO(ENOSPC)},
+			{FAN_OPEN_EXEC_PERM, FAN_DENY}
+		}
+	},
 };
 
 static int expected_errno(unsigned int response)
@@ -240,7 +250,7 @@ static void generate_events(struct tcase *tc)
 	}
 
 	exp_errno = 0;
-	if (event->mask & FAN_PRE_ACCESS) {
+	if (event->mask & (FAN_PRE_ACCESS | FAN_PRE_MODIFY)) {
 		exp_errno = expected_errno(event->response);
 		event++;
 	}
@@ -522,7 +532,7 @@ static void setup(void)
 	SAFE_TRUNCATE(fname, page_sz*101);
 
 	REQUIRE_FANOTIFY_EVENTS_SUPPORTED_ON_FS(FAN_CLASS_PRE_CONTENT, FAN_MARK_FILESYSTEM,
-						FAN_PRE_ACCESS | FAN_ONDIR, fname);
+						FAN_PRE_ACCESS | FAN_PRE_MODIFY | FAN_ONDIR, fname);
 
 	SAFE_CP(TEST_APP, FILE_EXEC_PATH);
 }
