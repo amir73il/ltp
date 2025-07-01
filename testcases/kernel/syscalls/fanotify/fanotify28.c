@@ -46,10 +46,17 @@
 #define TEST_APP "fanotify_child"
 #define MOUNT_PATH "fs_mnt"
 #define MNT2_PATH "bind_mnt"
-#define TEST_DIR MOUNT_PATH"/testdir"
+#define TEST_DIR_NAME "testdir"
+#define TEST_DIR MOUNT_PATH"/"TEST_DIR_NAME
 #define FILE_EXEC_PATH TEST_DIR"/"TEST_APP
 
+static char notfound[BUF_SIZE];
 static char fname[BUF_SIZE];
+static char lookup_path[BUF_SIZE];
+/* A path in TEST_DIR relative to the mount root, for use with bind_mount_fd */
+#define MOUNT_RELATIVE(path) ((path) + sizeof(MOUNT_PATH))
+/* The name of TEST_DIR in lookup events */
+static const char testdir_name[] = TEST_DIR_NAME;
 static char buf[BUF_SIZE];
 static volatile int fd_notify;
 static size_t page_sz;
@@ -57,13 +64,24 @@ static size_t page_sz;
 static pid_t child_pid;
 static int bind_mount_fd;
 
+static int pre_dir_access_unsupported;
+
 static char event_buf[EVENT_BUF_LEN];
 
 struct event {
 	unsigned long long mask;
 	unsigned int response;
-	const char *name;	/* path of the expected name in event */
+	const char *name;	/* path of the expected name in event, NULL for readdir */
 };
+
+/*
+ * FAN_DENY_ERRNO(ENOENT) is not a valid response. It is used in this test as
+ * a response marker for a lookup event, which tells the listener to populate
+ * a negative entry and respond with FAN_ALLOW.
+ * It means that if the listener fails to populate and replies FAN_ALLOW, the
+ * lookup will fail with ENOENT.
+ */
+#define FAN_ALLOW_ENOENT FAN_DENY_ERRNO(ENOENT)
 
 static struct tcase {
 	const char *tname;
@@ -106,6 +124,21 @@ static struct tcase {
 		}
 	},
 	{
+		"mount mark, FAN_PRE_DIR_ACCESS | FAN_PRE_ACCESS events",
+		INIT_FANOTIFY_MARK_TYPE(MOUNT),
+		FAN_PRE_DIR_ACCESS | FAN_PRE_ACCESS,
+		{
+			/* lookup of TEST_DIR in the mount root */
+			{FAN_PRE_DIR_ACCESS, FAN_ALLOW, testdir_name},
+			{FAN_PRE_DIR_ACCESS, FAN_ALLOW_ENOENT, lookup_path},
+			{FAN_PRE_DIR_ACCESS, FAN_ALLOW, NULL},
+			{FAN_PRE_ACCESS, FAN_ALLOW, fname},
+			{FAN_PRE_ACCESS, FAN_ALLOW, fname},
+			{FAN_PRE_ACCESS, FAN_DENY, fname},
+			{FAN_PRE_ACCESS, FAN_DENY_ERRNO(EIO), TEST_APP},
+		}
+	},
+	{
 		"filesystem mark, FAN_PRE_ACCESS events",
 		INIT_FANOTIFY_MARK_TYPE(FILESYSTEM),
 		FAN_PRE_ACCESS,
@@ -114,6 +147,21 @@ static struct tcase {
 			{FAN_PRE_ACCESS, FAN_ALLOW, fname},
 			{FAN_PRE_ACCESS, FAN_DENY_ERRNO(EIO), fname},
 			{FAN_PRE_ACCESS, FAN_DENY_ERRNO(EBUSY), TEST_APP},
+		}
+	},
+	{
+		"filesystem mark, FAN_PRE_DIR_ACCESS | FAN_PRE_ACCESS events",
+		INIT_FANOTIFY_MARK_TYPE(FILESYSTEM),
+		FAN_PRE_DIR_ACCESS | FAN_PRE_ACCESS,
+		{
+			/* lookup of TEST_DIR in the mount root */
+			{FAN_PRE_DIR_ACCESS, FAN_ALLOW, testdir_name},
+			{FAN_PRE_DIR_ACCESS, FAN_ALLOW_ENOENT, lookup_path},
+			{FAN_PRE_DIR_ACCESS, FAN_ALLOW, NULL},
+			{FAN_PRE_ACCESS, FAN_ALLOW, fname},
+			{FAN_PRE_ACCESS, FAN_ALLOW, fname},
+			{FAN_PRE_ACCESS, FAN_DENY, fname},
+			{FAN_PRE_ACCESS, FAN_DENY_ERRNO(EIO), TEST_APP},
 		}
 	},
 	{
@@ -127,6 +175,55 @@ static struct tcase {
 			{FAN_PRE_ACCESS, FAN_DENY_ERRNO(EBUSY), TEST_APP},
 		}
 	},
+	{
+		"parent watching children and self, FAN_PRE_DIR_ACCESS | FAN_PRE_ACCESS events",
+		INIT_FANOTIFY_MARK_TYPE(PARENT),
+		FAN_PRE_DIR_ACCESS | FAN_PRE_ACCESS,
+		{
+			{FAN_PRE_DIR_ACCESS, FAN_ALLOW_ENOENT, lookup_path},
+			{FAN_PRE_DIR_ACCESS, FAN_ALLOW, NULL},
+			{FAN_PRE_ACCESS, FAN_ALLOW, fname},
+			{FAN_PRE_ACCESS, FAN_ALLOW, fname},
+			{FAN_PRE_ACCESS, FAN_DENY, fname},
+			{FAN_PRE_ACCESS, FAN_DENY_ERRNO(EIO), TEST_APP},
+		}
+	},
+	{
+		"parent watching only itself, FAN_PRE_DIR_ACCESS events",
+		INIT_FANOTIFY_MARK_TYPE(PARENT),
+		FAN_PRE_DIR_ACCESS,
+		{
+			{FAN_PRE_DIR_ACCESS, FAN_ALLOW_ENOENT, lookup_path},
+			{FAN_PRE_DIR_ACCESS, FAN_ALLOW, NULL},
+		}
+	},
+	{
+		"mount mark, FAN_PRE_DIR_ACCESS events denied",
+		INIT_FANOTIFY_MARK_TYPE(MOUNT),
+		FAN_PRE_DIR_ACCESS,
+		{
+			/* lookup of TEST_DIR in the mount root */
+			{FAN_PRE_DIR_ACCESS, FAN_ALLOW, testdir_name},
+			/* lookup */
+			{FAN_PRE_DIR_ACCESS, FAN_DENY_ERRNO(EIO), lookup_path},
+			/* readdir, retried until allowed */
+			{FAN_PRE_DIR_ACCESS, FAN_DENY, NULL},
+			{FAN_PRE_DIR_ACCESS, FAN_DENY_ERRNO(EAGAIN), NULL},
+			{FAN_PRE_DIR_ACCESS, FAN_ALLOW, NULL},
+		}
+	},
+	{
+		"parent watching only itself, FAN_PRE_DIR_ACCESS events denied",
+		INIT_FANOTIFY_MARK_TYPE(PARENT),
+		FAN_PRE_DIR_ACCESS,
+		{
+			/* lookup */
+			{FAN_PRE_DIR_ACCESS, FAN_DENY, lookup_path},
+			/* readdir, retried until allowed */
+			{FAN_PRE_DIR_ACCESS, FAN_DENY_ERRNO(EBUSY), NULL},
+			{FAN_PRE_DIR_ACCESS, FAN_ALLOW, NULL},
+		}
+	},
 };
 
 static int expected_errno(unsigned int response)
@@ -134,6 +231,9 @@ static int expected_errno(unsigned int response)
 	switch (response) {
 	case 0:
 	case FAN_ALLOW:
+		return 0;
+	case FAN_ALLOW_ENOENT:
+		/* The listener populates the entry */
 		return 0;
 	case FAN_DENY:
 		return EPERM;
@@ -177,6 +277,48 @@ static void generate_events(struct tcase *tc)
 	char *const argv[] = {FILE_EXEC_PATH, NULL};
 	struct event *event = tc->event_set;
 	int exp_ret, exp_errno = 0;
+
+	if (tc->mask & FAN_PRE_DIR_ACCESS) {
+		DIR *dir;
+		struct dirent *ent;
+
+		/*
+		 * Lookup a unique name each test case to avoid negative cached
+		 * lookup result and generate FAN_PRE_DIR_ACCESS.
+		 * The lookup succeeds after the listener populates the entry
+		 * (FAN_ALLOW_ENOENT) or fails with the errno of the response if
+		 * denied.
+		 */
+		/* TEST_DIR is looked up first if the mount root is watched */
+		consume_event(&event, FAN_PRE_DIR_ACCESS, testdir_name);
+		exp_errno = consume_event(&event, FAN_PRE_DIR_ACCESS, lookup_path);
+		TST_EXP_PASS_OR_FAIL(faccessat(AT_FDCWD, lookup_path, F_OK, 0),
+				     exp_errno, "faccessat(%s)", lookup_path);
+
+		/*
+		 * Generate FAN_PRE_DIR_ACCESS on readdir, if a readdir event is
+		 * expected.
+		 * A denied event was not handled, so the next readdir generates
+		 * the event again.  Retry until readdir is allowed.
+		 * After this, no more FAN_PRE_DIR_ACCESS events are expected
+		 * on this dir until mount cycle.
+		 */
+		while (is_event(event, FAN_PRE_DIR_ACCESS, NULL)) {
+			exp_errno = consume_event(&event, FAN_PRE_DIR_ACCESS, NULL);
+			dir = SAFE_OPENDIR(TEST_DIR);
+			errno = 0;
+			ent = readdir(dir);
+			if (exp_errno ? ent || errno != exp_errno : !ent) {
+				tst_res(TFAIL, "readdir() got errno %d (expected %d)",
+					errno, exp_errno);
+				exit(2);
+			}
+			tst_res(TINFO, "readdir() got errno %d as expected", errno);
+			SAFE_CLOSEDIR(dir);
+			if (!exp_errno)
+				break;
+		}
+	}
 
 	/*
 	 * Generate sequence of events
@@ -232,7 +374,7 @@ static void generate_events(struct tcase *tc)
 	 * Therefore, ETXTBSY is to be expected when file is not being watched
 	 * at all or being watched but not with pre-content events in mask.
 	 */
-	if (!exp_errno) {
+	if (!exp_errno && !(tc->mask & FAN_PRE_DIR_ACCESS)) {
 		fd = SAFE_OPEN(FILE_EXEC_PATH, O_RDWR);
 		if (!tc->event_set[0].mask)
 			exp_errno = ETXTBSY;
@@ -314,6 +456,13 @@ static int setup_mark(unsigned int n)
 
 	tst_res(TINFO, "Test #%d: %s", n, tc->tname);
 
+	if (tc->mask & FAN_PRE_DIR_ACCESS) {
+		if (pre_dir_access_unsupported) {
+			tst_res(TCONF, "pre-content events on dir not supported in kernel?");
+			return -1;
+		}
+	}
+
 	fd_notify = SAFE_FANOTIFY_INIT(FAN_CLASS_PRE_CONTENT_FID, O_RDONLY);
 
 	/* Ignore pre-content events on mnt2 so we can use it for open_by_handle_at() */
@@ -376,6 +525,8 @@ static void test_fanotify(unsigned int n)
 	if (setup_mark(n) != 0)
 		return;
 
+	sprintf(lookup_path, TEST_DIR"/enoent_%u", n);
+
 	run_child(tc);
 
 	/*
@@ -390,6 +541,8 @@ static void test_fanotify(unsigned int n)
 		struct fanotify_event_info_fid *child_fid = NULL;
 		struct file_handle *file_handle = NULL;
 		const char *filename = NULL;
+		const char *exp_name;
+		int matched = 0;
 		unsigned int fhlen = 0;
 		int namelen = 0;
 
@@ -423,7 +576,8 @@ static void test_fanotify(unsigned int n)
 
 		event = (struct fanotify_event_metadata *)&event_buf[i];
 		event_fid = (struct fanotify_event_info_fid *)(event + 1);
-		if (event_fid->hdr.info_type == FAN_EVENT_INFO_TYPE_DFID_NAME) {
+		if (event_fid->hdr.info_type == FAN_EVENT_INFO_TYPE_DFID ||
+		    event_fid->hdr.info_type == FAN_EVENT_INFO_TYPE_DFID_NAME) {
 			file_handle = (struct file_handle *)event_fid->handle;
 			fhlen = file_handle->handle_bytes;
 			filename = (char *)file_handle->f_handle + fhlen;
@@ -440,6 +594,9 @@ static void test_fanotify(unsigned int n)
 			if (((char *)child_fid - (char *)event) >= event->event_len)
 				child_fid = NULL;
 		}
+
+		exp_name = event_set[test_num].name ?
+			   path_name(event_set[test_num].name) : "";
 
 		/*
 		 * Permission events cannot be merged, so the event mask
@@ -469,14 +626,15 @@ static void test_fanotify(unsigned int n)
 				(unsigned int)event->pid, event->fd,
 				event->event_len, event_fid->hdr.info_type,
 				event_fid->hdr.len, fhlen, namelen);
-		} else if (strcmp(filename, path_name(event_set[test_num].name))) {
+		} else if (strcmp(filename, exp_name)) {
 			tst_res(TFAIL,
 				"got event: mask=%llx pid=%u fd=%d filename=%s "
 				"(expected %s)",
 				(unsigned long long)event->mask,
 				(unsigned int)event->pid, event->fd,
-				filename, path_name(event_set[test_num].name));
+				filename, exp_name);
 		} else {
+			matched = 1;
 			tst_res(TPASS,
 				"got event: mask=%llx pid=%u fd=%d filename=%s",
 				(unsigned long long)event->mask,
@@ -490,6 +648,21 @@ static void test_fanotify(unsigned int n)
 
 			resp.fd = event->fd;
 			resp.response = event_set[test_num].response;
+			/* Do not populate an entry for an unexpected event */
+			if (resp.response == FAN_ALLOW_ENOENT && !matched) {
+				resp.response = FAN_ALLOW;
+			} else if (resp.response == FAN_ALLOW_ENOENT) {
+				/* Populate the entry in the dir via the ignored bind mount */
+				int dirfd = open_by_handle_at(bind_mount_fd, file_handle,
+							      O_RDONLY | O_DIRECTORY);
+
+				if (dirfd < 0)
+					tst_brk(TBROK | TERRNO, "open_by_handle_at() failed");
+				if (mknodat(dirfd, filename, S_IFREG | 0600, 0))
+					tst_brk(TBROK | TERRNO, "mknodat(%s) failed", filename);
+				SAFE_CLOSE(dirfd);
+				resp.response = FAN_ALLOW;
+			}
 			SAFE_WRITE(SAFE_WRITE_ALL, fd_notify, &resp, sizeof(resp));
 			tst_res(TPASS, "response=%x fd=%d", resp.response, resp.fd);
 		}
@@ -514,8 +687,19 @@ static void test_fanotify(unsigned int n)
 		if (event->fd >= 0) {
 			char c;
 
-			/* Verify that read from event fd does not generate events */
-			SAFE_READ(0, event->fd, &c, 1);
+			if (event->mask & FAN_PRE_DIR_ACCESS) {
+				/*
+				 * Verify that lookup with a directory event fd does not
+				 * generate FAN_PRE_DIR_ACCESS events.
+				 */
+				sprintf(notfound, "nonotify_%d", (int)(tc - tcases));
+				TST_EXP_FAIL(faccessat(event->fd, notfound, F_OK, 0),
+					     ENOENT, "faccessat(%d, %s)",
+					     event->fd, notfound);
+			} else {
+				/* Verify that read from event fd does not generate events */
+				SAFE_READ(0, event->fd, &c, 1);
+			}
 			SAFE_CLOSE(event->fd);
 		}
 
@@ -529,6 +713,10 @@ static void test_fanotify(unsigned int n)
 	}
 
 	check_child();
+
+	/* Remove the populated entry via the ignored bind mount */
+	if (unlinkat(bind_mount_fd, MOUNT_RELATIVE(lookup_path), 0) && errno != ENOENT)
+		tst_brk(TBROK | TERRNO, "unlinkat(%s) failed", lookup_path);
 
 	if (fd_notify > 0)
 		SAFE_CLOSE(fd_notify);
@@ -546,6 +734,11 @@ static void setup(void)
 	SAFE_TRUNCATE(fname, page_sz*101);
 
 	require_fanotify_pre_content_fid_supported_on_fs(fname);
+	pre_dir_access_unsupported = fanotify_flags_supported_on_fs(
+						FAN_CLASS_PRE_CONTENT |
+						FAN_REPORT_DFID_NAME_TARGET,
+						FAN_MARK_INODE,
+						FAN_PRE_DIR_ACCESS, MOUNT_PATH);
 
 	SAFE_CP(TEST_APP, FILE_EXEC_PATH);
 
