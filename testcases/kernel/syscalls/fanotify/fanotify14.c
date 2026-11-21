@@ -285,6 +285,20 @@ static struct test_case_t {
 		.mask = FLAGS_DESC(FAN_PRE_ACCESS | FAN_EVENT_ON_CHILD),
 		.expected_errno = EINVAL,
 	},
+	/* FAN_PRE_DIR_ACCESS requires class FAN_CLASS_PRE_CONTENT_FID */
+	{
+		.init = FLAGS_DESC(FAN_CLASS_PRE_CONTENT),
+		.mark = FLAGS_DESC(FAN_MARK_INODE),
+		.mask = FLAGS_DESC(FAN_PRE_DIR_ACCESS),
+		.expected_errno = EINVAL,
+	},
+	/* FAN_PRE_DIR_ACCESS in inode mark mask requires a directory */
+	{
+		.init = FLAGS_DESC(FAN_CLASS_PRE_CONTENT_FID),
+		.mark = FLAGS_DESC(FAN_MARK_INODE),
+		.mask = FLAGS_DESC(FAN_PRE_DIR_ACCESS),
+		.expected_errno = ENOTDIR,
+	},
 };
 
 static void do_test(unsigned int number)
@@ -305,7 +319,8 @@ static void do_test(unsigned int number)
 	}
 
 	if (pre_content_fid_unsupported && tc->mask.flags &&
-	    (tc->init.flags & FAN_CLASS_PRE_CONTENT_FID) == FAN_CLASS_PRE_CONTENT_FID) {
+	    ((tc->init.flags & FAN_CLASS_PRE_CONTENT_FID) == FAN_CLASS_PRE_CONTENT_FID ||
+	     tc->mask.flags & FAN_PRE_DIR_ACCESS)) {
 		tst_res(TCONF, "Pre-content events with fid info not supported on fs?");
 		return;
 	}
@@ -386,7 +401,8 @@ static void do_setup(void)
 	/* Unsupported in old kernels and on filesystems without HSM support */
 	pre_content_fid_unsupported =
 		fanotify_flags_supported_on_fs(FAN_CLASS_PRE_CONTENT_FID, FAN_MARK_INODE,
-					       FAN_PRE_ACCESS, MNTPOINT);
+					       FAN_PRE_ACCESS | FAN_PRE_DIR_ACCESS,
+					       MNTPOINT);
 
 	/* Create temporary test file to place marks on */
 	SAFE_FILE_PRINTF(FILE1, "0");
