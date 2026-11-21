@@ -46,6 +46,7 @@ static int pipes[2] = {-1, -1};
 static int fanotify_fd;
 static int ignore_mark_unsupported;
 static int filesystem_mark_unsupported;
+static int pre_content_fid_unsupported;
 static int se_enforcing;
 static unsigned int supported_init_flags;
 
@@ -258,6 +259,32 @@ static struct test_case_t {
 		.mask = FLAGS_DESC(LTP_PRE_CONTENT_EVENTS),
 		.expected_errno = EINVAL,
 	},
+	/* FAN_CLASS_PRE_CONTENT conflicts with the report fid modes */
+	{
+		.init = FLAGS_DESC(FAN_CLASS_PRE_CONTENT | FAN_REPORT_DFID_NAME),
+		.expected_errno = EINVAL,
+	},
+	/* Permission events are not allowed with FAN_CLASS_PRE_CONTENT_FID */
+	{
+		.init = FLAGS_DESC(FAN_CLASS_PRE_CONTENT_FID),
+		.mark = FLAGS_DESC(FAN_MARK_INODE),
+		.mask = FLAGS_DESC(FAN_OPEN_PERM),
+		.expected_errno = EINVAL,
+	},
+	/* FAN_ONDIR is not allowed with FAN_CLASS_PRE_CONTENT_FID */
+	{
+		.init = FLAGS_DESC(FAN_CLASS_PRE_CONTENT_FID),
+		.mark = FLAGS_DESC(FAN_MARK_INODE),
+		.mask = FLAGS_DESC(FAN_PRE_ACCESS | FAN_ONDIR),
+		.expected_errno = EINVAL,
+	},
+	/* FAN_EVENT_ON_CHILD is not allowed with FAN_CLASS_PRE_CONTENT_FID */
+	{
+		.init = FLAGS_DESC(FAN_CLASS_PRE_CONTENT_FID),
+		.mark = FLAGS_DESC(FAN_MARK_INODE),
+		.mask = FLAGS_DESC(FAN_PRE_ACCESS | FAN_EVENT_ON_CHILD),
+		.expected_errno = EINVAL,
+	},
 };
 
 static void do_test(unsigned int number)
@@ -274,6 +301,12 @@ static void do_test(unsigned int number)
 
 	if (ignore_mark_unsupported && tc->mark.flags & FAN_MARK_IGNORE) {
 		tst_res(TCONF, "FAN_MARK_IGNORE not supported in kernel?");
+		return;
+	}
+
+	if (pre_content_fid_unsupported && tc->mask.flags &&
+	    (tc->init.flags & FAN_CLASS_PRE_CONTENT_FID) == FAN_CLASS_PRE_CONTENT_FID) {
+		tst_res(TCONF, "Pre-content events with fid info not supported on fs?");
 		return;
 	}
 
@@ -350,6 +383,10 @@ static void do_setup(void)
 	filesystem_mark_unsupported =
 		fanotify_flags_supported_on_fs(FAN_REPORT_FID, FAN_MARK_FILESYSTEM, FAN_OPEN,
 						MNTPOINT);
+	/* Unsupported in old kernels and on filesystems without HSM support */
+	pre_content_fid_unsupported =
+		fanotify_flags_supported_on_fs(FAN_CLASS_PRE_CONTENT_FID, FAN_MARK_INODE,
+					       FAN_PRE_ACCESS, MNTPOINT);
 
 	/* Create temporary test file to place marks on */
 	SAFE_FILE_PRINTF(FILE1, "0");
