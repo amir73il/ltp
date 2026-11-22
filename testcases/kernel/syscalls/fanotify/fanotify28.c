@@ -53,6 +53,7 @@
 static char notfound[BUF_SIZE];
 static char fname[BUF_SIZE];
 static char lookup_path[BUF_SIZE];
+static char newent_path[BUF_SIZE];
 static char entry_path[BUF_SIZE];
 static char renamed_path[BUF_SIZE];
 /* A path in TEST_DIR relative to the mount root, for use with bind_mount_fd */
@@ -133,6 +134,9 @@ static struct tcase {
 			/* lookup of TEST_DIR in the mount root */
 			{FAN_PRE_DIR_ACCESS, FAN_ALLOW, testdir_name},
 			{FAN_PRE_DIR_ACCESS, FAN_ALLOW_ENOENT, lookup_path},
+			/* open() denied and creat() allowed of a new name */
+			{FAN_PRE_DIR_ACCESS, FAN_DENY, newent_path},
+			{FAN_PRE_DIR_ACCESS, FAN_ALLOW, newent_path},
 			{FAN_PRE_DIR_ACCESS, FAN_ALLOW, NULL},
 			{FAN_PRE_ACCESS, FAN_ALLOW, fname},
 			{FAN_PRE_ACCESS, FAN_ALLOW, fname},
@@ -159,6 +163,9 @@ static struct tcase {
 			/* lookup of TEST_DIR in the mount root */
 			{FAN_PRE_DIR_ACCESS, FAN_ALLOW, testdir_name},
 			{FAN_PRE_DIR_ACCESS, FAN_ALLOW_ENOENT, lookup_path},
+			/* open() denied and creat() allowed of a new name */
+			{FAN_PRE_DIR_ACCESS, FAN_DENY, newent_path},
+			{FAN_PRE_DIR_ACCESS, FAN_ALLOW, newent_path},
 			{FAN_PRE_DIR_ACCESS, FAN_ALLOW, NULL},
 			{FAN_PRE_ACCESS, FAN_ALLOW, fname},
 			{FAN_PRE_ACCESS, FAN_ALLOW, fname},
@@ -183,6 +190,9 @@ static struct tcase {
 		FAN_PRE_DIR_ACCESS | FAN_PRE_ACCESS,
 		{
 			{FAN_PRE_DIR_ACCESS, FAN_ALLOW_ENOENT, lookup_path},
+			/* open() denied and creat() allowed of a new name */
+			{FAN_PRE_DIR_ACCESS, FAN_DENY, newent_path},
+			{FAN_PRE_DIR_ACCESS, FAN_ALLOW, newent_path},
 			{FAN_PRE_DIR_ACCESS, FAN_ALLOW, NULL},
 			{FAN_PRE_ACCESS, FAN_ALLOW, fname},
 			{FAN_PRE_ACCESS, FAN_ALLOW, fname},
@@ -196,6 +206,9 @@ static struct tcase {
 		FAN_PRE_DIR_ACCESS,
 		{
 			{FAN_PRE_DIR_ACCESS, FAN_ALLOW_ENOENT, lookup_path},
+			/* open() denied and creat() allowed of a new name */
+			{FAN_PRE_DIR_ACCESS, FAN_DENY, newent_path},
+			{FAN_PRE_DIR_ACCESS, FAN_ALLOW, newent_path},
 			{FAN_PRE_DIR_ACCESS, FAN_ALLOW, NULL},
 		}
 	},
@@ -208,6 +221,9 @@ static struct tcase {
 			{FAN_PRE_DIR_ACCESS, FAN_ALLOW, testdir_name},
 			/* lookup */
 			{FAN_PRE_DIR_ACCESS, FAN_DENY_ERRNO(EIO), lookup_path},
+			/* open() denied and creat() allowed of a new name */
+			{FAN_PRE_DIR_ACCESS, FAN_DENY, newent_path},
+			{FAN_PRE_DIR_ACCESS, FAN_ALLOW, newent_path},
 			/* readdir, retried until allowed */
 			{FAN_PRE_DIR_ACCESS, FAN_DENY, NULL},
 			{FAN_PRE_DIR_ACCESS, FAN_DENY_ERRNO(EAGAIN), NULL},
@@ -221,6 +237,9 @@ static struct tcase {
 		{
 			/* lookup */
 			{FAN_PRE_DIR_ACCESS, FAN_DENY, lookup_path},
+			/* open() denied and creat() allowed of a new name */
+			{FAN_PRE_DIR_ACCESS, FAN_DENY, newent_path},
+			{FAN_PRE_DIR_ACCESS, FAN_ALLOW, newent_path},
 			/* readdir, retried until allowed */
 			{FAN_PRE_DIR_ACCESS, FAN_DENY_ERRNO(EBUSY), NULL},
 			{FAN_PRE_DIR_ACCESS, FAN_ALLOW, NULL},
@@ -235,6 +254,9 @@ static struct tcase {
 			{FAN_PRE_DIR_ACCESS, FAN_ALLOW, testdir_name},
 			/* lookup, without readdir */
 			{FAN_PRE_DIR_ACCESS, FAN_ALLOW_ENOENT, lookup_path},
+			/* open() denied and creat() allowed of a new name */
+			{FAN_PRE_DIR_ACCESS, FAN_DENY, newent_path},
+			{FAN_PRE_DIR_ACCESS, FAN_ALLOW, newent_path},
 			/* mknod(), retry after one deny */
 			{FAN_PRE_DIR_ACCESS, FAN_DENY_ERRNO(EAGAIN), entry_path},
 			{FAN_PRE_DIR_ACCESS, FAN_ALLOW, entry_path},
@@ -319,6 +341,23 @@ static void generate_events(struct tcase *tc)
 		exp_errno = consume_event(&event, FAN_PRE_DIR_ACCESS, lookup_path);
 		TST_EXP_PASS_OR_FAIL(faccessat(AT_FDCWD, lookup_path, F_OK, 0),
 				     exp_errno, "faccessat(%s)", lookup_path);
+
+		/*
+		 * open() and creat() of a new name generate FAN_PRE_DIR_ACCESS
+		 * for the lookup of the last component.  open() fails with the
+		 * errno of the response if denied and creat() creates the entry
+		 * if allowed.
+		 */
+		exp_errno = consume_event(&event, FAN_PRE_DIR_ACCESS, newent_path);
+		TST_EXP_FD_OR_FAIL(open(newent_path, O_RDONLY), exp_errno,
+				   "open(%s)", newent_path);
+		if (TST_RET >= 0)
+			SAFE_CLOSE(TST_RET);
+		exp_errno = consume_event(&event, FAN_PRE_DIR_ACCESS, newent_path);
+		TST_EXP_FD_OR_FAIL(creat(newent_path, 0600), exp_errno,
+				   "creat(%s)", newent_path);
+		if (TST_RET >= 0)
+			SAFE_CLOSE(TST_RET);
 
 		/*
 		 * Generate FAN_PRE_DIR_ACCESS on readdir, if a readdir event is
@@ -582,6 +621,7 @@ static void test_fanotify(unsigned int n)
 		return;
 
 	sprintf(lookup_path, TEST_DIR"/enoent_%u", n);
+	sprintf(newent_path, TEST_DIR"/newent_%u", n);
 	sprintf(entry_path, TEST_DIR"/entry_%u", n);
 	sprintf(renamed_path, TEST_DIR"/renamed_%u", n);
 
@@ -773,9 +813,11 @@ static void test_fanotify(unsigned int n)
 
 	check_child();
 
-	/* Remove the populated entry via the ignored bind mount */
+	/* Remove the populated and created entries via the ignored bind mount */
 	if (unlinkat(bind_mount_fd, MOUNT_RELATIVE(lookup_path), 0) && errno != ENOENT)
 		tst_brk(TBROK | TERRNO, "unlinkat(%s) failed", lookup_path);
+	if (unlinkat(bind_mount_fd, MOUNT_RELATIVE(newent_path), 0) && errno != ENOENT)
+		tst_brk(TBROK | TERRNO, "unlinkat(%s) failed", newent_path);
 
 	if (fd_notify > 0)
 		SAFE_CLOSE(fd_notify);
