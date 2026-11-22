@@ -53,6 +53,8 @@
 static char notfound[BUF_SIZE];
 static char fname[BUF_SIZE];
 static char lookup_path[BUF_SIZE];
+static char entry_path[BUF_SIZE];
+static char renamed_path[BUF_SIZE];
 /* A path in TEST_DIR relative to the mount root, for use with bind_mount_fd */
 #define MOUNT_RELATIVE(path) ((path) + sizeof(MOUNT_PATH))
 /* The name of TEST_DIR in lookup events */
@@ -224,6 +226,29 @@ static struct tcase {
 			{FAN_PRE_DIR_ACCESS, FAN_ALLOW, NULL},
 		}
 	},
+	{
+		"mount mark, FAN_PRE_DIR_ACCESS events on create, rename and remove",
+		INIT_FANOTIFY_MARK_TYPE(MOUNT),
+		FAN_PRE_DIR_ACCESS,
+		{
+			/* lookup of TEST_DIR in the mount root */
+			{FAN_PRE_DIR_ACCESS, FAN_ALLOW, testdir_name},
+			/* lookup, without readdir */
+			{FAN_PRE_DIR_ACCESS, FAN_ALLOW_ENOENT, lookup_path},
+			/* mknod(), retry after one deny */
+			{FAN_PRE_DIR_ACCESS, FAN_DENY_ERRNO(EAGAIN), entry_path},
+			{FAN_PRE_DIR_ACCESS, FAN_ALLOW, entry_path},
+			/* rename() old and new name */
+			{FAN_PRE_DIR_ACCESS, FAN_ALLOW, entry_path},
+			{FAN_PRE_DIR_ACCESS, FAN_ALLOW, renamed_path},
+			/* unlink() */
+			{FAN_PRE_DIR_ACCESS, FAN_ALLOW, renamed_path},
+			/* open() */
+			{FAN_PRE_DIR_ACCESS, FAN_ALLOW, fname},
+			/* execve() */
+			{FAN_PRE_DIR_ACCESS, FAN_ALLOW, TEST_APP},
+		},
+	},
 };
 
 static int expected_errno(unsigned int response)
@@ -318,11 +343,40 @@ static void generate_events(struct tcase *tc)
 			if (!exp_errno)
 				break;
 		}
+
+		/*
+		 * After readdir, create, rename and remove don't generate events.
+		 * Without readdir, mknod() and unlink() report an event each and
+		 * rename() reports events for the old name and the new name.
+		 * A denied mknod() event was not handled, so the retried mknod()
+		 * generates the event again.
+		 */
+		do {
+			exp_errno = consume_event(&event, FAN_PRE_DIR_ACCESS, entry_path);
+			TST_EXP_PASS_OR_FAIL(mknod(entry_path, S_IFREG | 0600, 0),
+					     exp_errno, "mknod(%s)", entry_path);
+			if (!TST_PASS)
+				exit(2);
+			/* Retry create on failure */
+		} while (exp_errno);
+
+		consume_event(&event, FAN_PRE_DIR_ACCESS, entry_path);
+		consume_event(&event, FAN_PRE_DIR_ACCESS, renamed_path);
+		TST_EXP_PASS(rename(entry_path, renamed_path), "rename(%s, %s)",
+			     entry_path, renamed_path);
+		if (!TST_PASS)
+			exit(2);
+		consume_event(&event, FAN_PRE_DIR_ACCESS, renamed_path);
+		TST_EXP_PASS(unlink(renamed_path), "unlink(%s)", renamed_path);
+		if (!TST_PASS)
+			exit(2);
 	}
 
 	/*
 	 * Generate sequence of events
 	 */
+	/* Without readdir, open() reports an event for the lookup of fname */
+	consume_event(&event, FAN_PRE_DIR_ACCESS, fname);
 	fd = SAFE_OPEN(fname, O_RDWR);
 
 	exp_errno = consume_event(&event, FAN_PRE_ACCESS, fname);
@@ -365,6 +419,8 @@ static void generate_events(struct tcase *tc)
 
 	SAFE_CLOSE(fd);
 
+	/* Without readdir, execve() reports an event for the lookup of TEST_APP */
+	consume_event(&event, FAN_PRE_DIR_ACCESS, TEST_APP);
 	exp_errno = consume_event(&event, FAN_PRE_ACCESS, TEST_APP);
 	/*
 	 * Check if executing a file that open for write is allowed.
@@ -526,6 +582,8 @@ static void test_fanotify(unsigned int n)
 		return;
 
 	sprintf(lookup_path, TEST_DIR"/enoent_%u", n);
+	sprintf(entry_path, TEST_DIR"/entry_%u", n);
+	sprintf(renamed_path, TEST_DIR"/renamed_%u", n);
 
 	run_child(tc);
 
@@ -707,8 +765,9 @@ static void test_fanotify(unsigned int n)
 	}
 
 	for (; event_set[test_num].mask && test_num < EVENT_SET_MAX; test_num++) {
-		tst_res(TFAIL, "didn't get event: mask=%llx",
-			event_set[test_num].mask);
+		tst_res(TFAIL, "didn't get event: mask=%llx filename=%s",
+			event_set[test_num].mask,
+			event_set[test_num].name ?: "");
 
 	}
 
