@@ -295,10 +295,28 @@ static int expected_errno(unsigned int response)
 	}
 }
 
-/* Whether the next event in the event set is the event of an operation */
-static int is_event(const struct event *event, unsigned long long mask,
+/*
+ * Whether an event in the event set is expected in the test variant.
+ * For now, all events are expected.
+ */
+static int expected(const struct event *event LTP_ATTRIBUTE_UNUSED)
+{
+	return 1;
+}
+
+/* Skip the events in the event set that are not expected in the test variant */
+static struct event *next_event(struct event *event)
+{
+	while (event->mask && !expected(event))
+		event++;
+	return event;
+}
+
+/* Whether the next expected event in the event set is the event of an operation */
+static int is_event(struct event *event, unsigned long long mask,
 		    const char *name)
 {
+	event = next_event(event);
 	return event->mask == mask && event->name == name;
 }
 
@@ -312,6 +330,7 @@ static int consume_event(struct event **event, unsigned long long mask,
 {
 	if (!is_event(*event, mask, name))
 		return 0;
+	*event = next_event(*event);
 	return expected_errno((*event)++->response);
 }
 
@@ -661,7 +680,7 @@ static void mount_cycle(void)
 
 static void test_fanotify(unsigned int n)
 {
-	int ret, len = 0, i = 0, test_num = 0;
+	int ret, len = 0, i = 0, test_num = 0, last_num = -1;
 	struct tcase *tc = &tcases[n];
 	struct event *event_set = tc->event_set;
 
@@ -707,18 +726,23 @@ static void test_fanotify(unsigned int n)
 			len += ret;
 		}
 
+		/* Skip the events that are not expected in the test variant */
+		while (test_num < EVENT_SET_MAX && event_set[test_num].mask &&
+		       !expected(&event_set[test_num]))
+			test_num++;
+
 		/*
-		 * If we got an event after the last event and the last event was
-		 * an allowed FAN_PRE_ACCESS event, then assume this is another
-		 * event of the same type.
+		 * If we got an event after the last event and the last matched
+		 * event was an allowed FAN_PRE_ACCESS event, then assume this is
+		 * another event of the same type.
 		 * This is to accomodate for the fact that a single execve() may
 		 * generate an unknown number of FAN_PRE_ACCESS events if they
 		 * are allowed.
 		 */
-		if (test_num > 0 && !event_set[test_num].mask &&
-		    event_set[test_num-1].mask == FAN_PRE_ACCESS &&
-		    event_set[test_num-1].response == FAN_ALLOW)
-			test_num--;
+		if (last_num >= 0 && !event_set[test_num].mask &&
+		    event_set[last_num].mask == FAN_PRE_ACCESS &&
+		    event_set[last_num].response == FAN_ALLOW)
+			test_num = last_num;
 
 		event = (struct fanotify_event_metadata *)&event_buf[i];
 		event_fid = (struct fanotify_event_info_fid *)(event + 1);
@@ -849,10 +873,12 @@ static void test_fanotify(unsigned int n)
 			SAFE_CLOSE(event->fd);
 		}
 
-		test_num++;
+		last_num = test_num++;
 	}
 
 	for (; event_set[test_num].mask && test_num < EVENT_SET_MAX; test_num++) {
+		if (!expected(&event_set[test_num]))
+			continue;
 		tst_res(TFAIL, "didn't get event: mask=%llx filename=%s",
 			event_set[test_num].mask,
 			event_set[test_num].name ?: "");
