@@ -44,7 +44,7 @@
 #define BUF_SIZE 256
 #define TST_TOTAL 3
 #define TEST_APP "fanotify_child"
-#define MOUNT_PATH "fs_mnt"
+#define MOUNT_PATH OVL_BASE_MNTPOINT
 #define MNT2_PATH "bind_mnt"
 #define TEST_DIR_NAME "testdir"
 #define TEST_DIR MOUNT_PATH"/"TEST_DIR_NAME
@@ -56,6 +56,14 @@ static char notfound[BUF_SIZE];
  */
 static const char *watch_dir = TEST_DIR;
 static const char *access_dir = TEST_DIR;
+
+/*
+ * Variant #0: watch base fs - access test files on base fs
+ * Variant #1: watch lower fs - access lower test files via overlayfs
+ * Variant #2: watch upper fs - access upper test files via overlayfs
+ */
+#define TST_VARIANT_OVL_LOWER (tst_variant == 1)
+static int ovl_mounted;
 
 /* Paths in access_dir */
 static char fname[BUF_SIZE];
@@ -295,12 +303,15 @@ static int expected_errno(unsigned int response)
 	}
 }
 
-/*
- * Whether an event in the event set is expected in the test variant.
- * For now, all events are expected.
- */
-static int expected(const struct event *event LTP_ATTRIBUTE_UNUSED)
+/* Whether an event in the event set is expected in the test variant */
+static int expected(const struct event *event)
 {
+	/*
+	 * Overlayfs looks up names in the layers as an internal user, so
+	 * lookups via overlayfs do not generate events.
+	 */
+	if (tst_variant && event->mask == FAN_PRE_DIR_ACCESS && event->name)
+		return 0;
 	return 1;
 }
 
@@ -334,6 +345,32 @@ static int consume_event(struct event **event, unsigned long long mask,
 	return expected_errno((*event)++->response);
 }
 
+/*
+ * A negative lookup by an internal user in a watched dir that was not
+ * populated by an allowed readdir fails with ENOENT.
+ * Via overlayfs, the lookup of a missing name fails with ENOENT, because no
+ * event is generated to populate the name.
+ */
+static int lookup_errno(int exp_errno)
+{
+	return tst_variant ? ENOENT : exp_errno;
+}
+
+/*
+ * Via overlayfs, a create looks up the new name in the watched layer dir, so
+ * it fails with ENOENT until the dir is populated.  With a filesystem mark,
+ * the copy up of the test dir to upper looks up the test dir in the
+ * unpopulated upper root, so it fails with ENOENT even after readdir.
+ */
+static int create_errno(struct tcase *tc, int exp_errno, int populated)
+{
+	if (!tst_variant)
+		return exp_errno;
+	if (TST_VARIANT_OVL_LOWER && tc->mark.flag == FAN_MARK_FILESYSTEM)
+		return ENOENT;
+	return populated ? 0 : ENOENT;
+}
+
 /* Convert a path in access_dir to the same path in watch_dir */
 static const char *watch_path(char *buf, const char *path)
 {
@@ -360,6 +397,7 @@ static void generate_events(struct tcase *tc)
 	if (tc->mask & FAN_PRE_DIR_ACCESS) {
 		DIR *dir;
 		struct dirent *ent;
+		int populated = 0, denied;
 
 		/*
 		 * Lookup a unique name each test case to avoid negative cached
@@ -371,6 +409,7 @@ static void generate_events(struct tcase *tc)
 		/* TEST_DIR is looked up first if the mount root is watched */
 		consume_event(&event, FAN_PRE_DIR_ACCESS, testdir_name);
 		exp_errno = consume_event(&event, FAN_PRE_DIR_ACCESS, lookup_path);
+		exp_errno = lookup_errno(exp_errno);
 		TST_EXP_PASS_OR_FAIL(faccessat(AT_FDCWD, lookup_path, F_OK, 0),
 				     exp_errno, "faccessat(%s)", lookup_path);
 
@@ -381,11 +420,13 @@ static void generate_events(struct tcase *tc)
 		 * if allowed.
 		 */
 		exp_errno = consume_event(&event, FAN_PRE_DIR_ACCESS, newent_path);
+		exp_errno = lookup_errno(exp_errno);
 		TST_EXP_FD_OR_FAIL(open(newent_path, O_RDONLY), exp_errno,
 				   "open(%s)", newent_path);
 		if (TST_RET >= 0)
 			SAFE_CLOSE(TST_RET);
 		exp_errno = consume_event(&event, FAN_PRE_DIR_ACCESS, newent_path);
+		exp_errno = create_errno(tc, exp_errno, populated);
 		TST_EXP_FD_OR_FAIL(creat(newent_path, 0600), exp_errno,
 				   "creat(%s)", newent_path);
 		if (TST_RET >= 0)
@@ -411,8 +452,10 @@ static void generate_events(struct tcase *tc)
 			}
 			tst_res(TINFO, "readdir() got errno %d as expected", errno);
 			SAFE_CLOSEDIR(dir);
-			if (!exp_errno)
+			if (!exp_errno) {
+				populated = 1;
 				break;
+			}
 		}
 
 		/*
@@ -423,24 +466,27 @@ static void generate_events(struct tcase *tc)
 		 * generates the event again.
 		 */
 		do {
-			exp_errno = consume_event(&event, FAN_PRE_DIR_ACCESS, entry_path);
+			denied = consume_event(&event, FAN_PRE_DIR_ACCESS, entry_path);
+			exp_errno = create_errno(tc, denied, populated);
 			TST_EXP_PASS_OR_FAIL(mknod(entry_path, S_IFREG | 0600, 0),
 					     exp_errno, "mknod(%s)", entry_path);
 			if (!TST_PASS)
 				exit(2);
-			/* Retry create on failure */
-		} while (exp_errno);
+			/* Retry create if denied */
+		} while (denied);
 
-		consume_event(&event, FAN_PRE_DIR_ACCESS, entry_path);
-		consume_event(&event, FAN_PRE_DIR_ACCESS, renamed_path);
-		TST_EXP_PASS(rename(entry_path, renamed_path), "rename(%s, %s)",
-			     entry_path, renamed_path);
-		if (!TST_PASS)
-			exit(2);
-		consume_event(&event, FAN_PRE_DIR_ACCESS, renamed_path);
-		TST_EXP_PASS(unlink(renamed_path), "unlink(%s)", renamed_path);
-		if (!TST_PASS)
-			exit(2);
+		if (!exp_errno) {
+			consume_event(&event, FAN_PRE_DIR_ACCESS, entry_path);
+			consume_event(&event, FAN_PRE_DIR_ACCESS, renamed_path);
+			TST_EXP_PASS(rename(entry_path, renamed_path), "rename(%s, %s)",
+				     entry_path, renamed_path);
+			if (!TST_PASS)
+				exit(2);
+			consume_event(&event, FAN_PRE_DIR_ACCESS, renamed_path);
+			TST_EXP_PASS(unlink(renamed_path), "unlink(%s)", renamed_path);
+			if (!TST_PASS)
+				exit(2);
+		}
 	}
 
 	/*
@@ -448,7 +494,8 @@ static void generate_events(struct tcase *tc)
 	 */
 	/* Without readdir, open() reports an event for the lookup of fname */
 	consume_event(&event, FAN_PRE_DIR_ACCESS, fname);
-	fd = SAFE_OPEN(fname, O_RDWR);
+	/* Open for write via overlayfs would copy up the lower file */
+	fd = SAFE_OPEN(fname, TST_VARIANT_OVL_LOWER ? O_RDONLY : O_RDWR);
 
 	exp_errno = consume_event(&event, FAN_PRE_ACCESS, fname);
 	exp_ret = exp_errno ? -1 : 1;
@@ -467,12 +514,19 @@ static void generate_events(struct tcase *tc)
 	}
 
 	exp_errno = consume_event(&event, FAN_PRE_ACCESS, fname);
-	exp_ret = exp_errno ? -1 : 1;
 	errno = 0;
-	if (write(fd, addr, 1) != exp_ret || errno != exp_errno) {
+	if (TST_VARIANT_OVL_LOWER) {
+		/* Instead of write, read a range far from the mmap and read ranges */
+		exp_ret = exp_errno ? -1 : BUF_SIZE;
+		if (pread(fd, buf, BUF_SIZE, page_sz*50) != exp_ret || errno != exp_errno) {
+			tst_res(TFAIL, "pread() got errno %d (expected %d)", errno, exp_errno);
+			exit(3);
+		}
+		tst_res(TINFO, "pread() got errno %d as expected", errno);
+	} else if (write(fd, addr, 1) != (exp_errno ? -1 : 1) || errno != exp_errno) {
 		tst_res(TFAIL, "write() got errno %d (expected %d)", errno, exp_errno);
 		exit(3);
-	} else if (errno == exp_errno) {
+	} else {
 		tst_res(TINFO, "write() got errno %d as expected", errno);
 	}
 
@@ -500,8 +554,11 @@ static void generate_events(struct tcase *tc)
 	 * means that a file open for write can be executed.
 	 * Therefore, ETXTBSY is to be expected when file is not being watched
 	 * at all or being watched but not with pre-content events in mask.
+	 * Via overlayfs, open for write would copy up a lower file, so the
+	 * executed file would not be the watched lower file.
 	 */
-	if (!exp_errno && !(tc->mask & FAN_PRE_DIR_ACCESS)) {
+	if (!exp_errno && !(tc->mask & FAN_PRE_DIR_ACCESS) &&
+	    !TST_VARIANT_OVL_LOWER) {
 		fd = SAFE_OPEN(exec_path, O_RDWR);
 		if (!tc->event_set[0].mask)
 			exp_errno = ETXTBSY;
@@ -581,7 +638,18 @@ static int setup_mark(unsigned int n)
 	struct fanotify_mark_type *mark = &tc->mark;
 	char files[2][BUF_SIZE];
 
-	tst_res(TINFO, "Test #%d: %s", n, tc->tname);
+	tst_res(TINFO, "Test #%d.%d: %s", n, tst_variant, tc->tname);
+
+	if (tst_variant && !ovl_mounted) {
+		tst_res(TCONF, "overlayfs not supported on %s", tst_device->fs_type);
+		return -1;
+	}
+
+	/* The mounts of overlayfs layers are private and cannot be watched */
+	if (tst_variant && mark->flag == FAN_MARK_MOUNT) {
+		tst_res(TCONF, "mount mark on overlayfs layer cannot be tested");
+		return -1;
+	}
 
 	if (tc->mask & FAN_PRE_DIR_ACCESS) {
 		if (pre_dir_access_unsupported) {
@@ -635,6 +703,9 @@ static void umount_bind_mount(void)
 /* Unmount the mounts on top of the watched filesystem */
 static void umount_layers(void)
 {
+	if (ovl_mounted)
+		SAFE_UMOUNT(OVL_MNT);
+	ovl_mounted = 0;
 	umount_bind_mount();
 }
 
@@ -646,6 +717,9 @@ static void mount_layers(void)
 	SAFE_MOUNT(MOUNT_PATH, MNT2_PATH, "none", MS_BIND, NULL);
 	bind_mount_fd = -1;
 	bind_mount_fd = SAFE_OPEN(MNT2_PATH, O_DIRECTORY);
+
+	if (tst_variant)
+		ovl_mounted = TST_MOUNT_OVERLAY();
 }
 
 /* Remove the entries populated or created by the last test case */
@@ -653,6 +727,15 @@ static void reset_test_dir(void)
 {
 	static const char *const paths[] = {lookup_path, newent_path};
 	char path[BUF_SIZE];
+
+	/*
+	 * Remove the copied up and created entries from upper and the index
+	 * from work dir, which would not match the purged upper entries.
+	 */
+	if (TST_VARIANT_OVL_LOWER)
+		tst_purge_dir(OVL_UPPER);
+	if (tst_variant)
+		tst_purge_dir(OVL_WORK);
 
 	for (unsigned int i = 0; i < ARRAY_SIZE(paths); i++) {
 		if (!*paths[i])
@@ -899,6 +982,13 @@ static void setup(void)
 
 	page_sz = getpagesize();
 
+	if (tst_variant) {
+		tst_create_overlay_dirs();
+		watch_dir = TST_VARIANT_OVL_LOWER ? OVL_LOWER"/"TEST_DIR_NAME :
+						    OVL_UPPER"/"TEST_DIR_NAME;
+		access_dir = OVL_MNT"/"TEST_DIR_NAME;
+	}
+
 	sprintf(fname, "%s/fname_%d", access_dir, getpid());
 	sprintf(exec_path, "%s/%s", access_dir, TEST_APP);
 
@@ -937,6 +1027,7 @@ static struct tst_test test = {
 	.timeout = 1,
 	.test = test_fanotify,
 	.tcnt = ARRAY_SIZE(tcases),
+	.test_variants = 3,
 	.setup = setup,
 	.cleanup = cleanup,
 	.forks_child = 1,
