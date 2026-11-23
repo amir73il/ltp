@@ -64,8 +64,6 @@ static char lookup_path[BUF_SIZE];
 static char newent_path[BUF_SIZE];
 static char entry_path[BUF_SIZE];
 static char renamed_path[BUF_SIZE];
-/* A path in watch_dir relative to the mount root, for use with bind_mount_fd */
-#define MOUNT_RELATIVE(path) ((path) + sizeof(MOUNT_PATH))
 /* The name of TEST_DIR in lookup events */
 static const char testdir_name[] = TEST_DIR_NAME;
 static char buf[BUF_SIZE];
@@ -615,12 +613,15 @@ static void umount_bind_mount(void)
 	}
 }
 
-/* Umount fs to evict the root dentry which caches the "HSM handled" dir status */
-static void mount_cycle(void)
+/* Unmount the mounts on top of the watched filesystem */
+static void umount_layers(void)
 {
 	umount_bind_mount();
-	SAFE_UMOUNT(MOUNT_PATH);
-	SAFE_MOUNT(tst_device->dev, MOUNT_PATH, tst_device->fs_type, 0, NULL);
+}
+
+/* Mount the mounts on top of the watched filesystem */
+static void mount_layers(void)
+{
 	/* Create another bind mount at another path for open_by_file_handle() */
 	SAFE_MKDIR(MNT2_PATH, 0755);
 	SAFE_MOUNT(MOUNT_PATH, MNT2_PATH, "none", MS_BIND, NULL);
@@ -628,12 +629,41 @@ static void mount_cycle(void)
 	bind_mount_fd = SAFE_OPEN(MNT2_PATH, O_DIRECTORY);
 }
 
+/* Remove the entries populated or created by the last test case */
+static void reset_test_dir(void)
+{
+	static const char *const paths[] = {lookup_path, newent_path};
+	char path[BUF_SIZE];
+
+	for (unsigned int i = 0; i < ARRAY_SIZE(paths); i++) {
+		if (!*paths[i])
+			continue;
+		watch_path(path, paths[i]);
+		if (unlink(path) && errno != ENOENT)
+			tst_brk(TBROK | TERRNO, "unlink(%s) failed", path);
+	}
+}
+
+/*
+ * Mount cycle to evict the dentries which cache the "HSM handled" dir status
+ * between test cases.
+ * The test dir is reset while no fanotify group is watching and the
+ * mounts on top of the watched filesystem are not mounted.
+ */
+static void mount_cycle(void)
+{
+	umount_layers();
+	reset_test_dir();
+	SAFE_UMOUNT(MOUNT_PATH);
+	SAFE_MOUNT(tst_device->dev, MOUNT_PATH, tst_device->fs_type, 0, NULL);
+	mount_layers();
+}
+
 static void test_fanotify(unsigned int n)
 {
 	int ret, len = 0, i = 0, test_num = 0;
 	struct tcase *tc = &tcases[n];
 	struct event *event_set = tc->event_set;
-	char path[BUF_SIZE];
 
 	if (setup_mark(n) != 0)
 		return;
@@ -831,14 +861,6 @@ static void test_fanotify(unsigned int n)
 
 	check_child();
 
-	/* Remove the populated and created entries via the ignored bind mount */
-	watch_path(path, lookup_path);
-	if (unlinkat(bind_mount_fd, MOUNT_RELATIVE(path), 0) && errno != ENOENT)
-		tst_brk(TBROK | TERRNO, "unlinkat(%s) failed", path);
-	watch_path(path, newent_path);
-	if (unlinkat(bind_mount_fd, MOUNT_RELATIVE(path), 0) && errno != ENOENT)
-		tst_brk(TBROK | TERRNO, "unlinkat(%s) failed", path);
-
 	if (fd_notify > 0)
 		SAFE_CLOSE(fd_notify);
 
@@ -877,7 +899,7 @@ static void cleanup(void)
 	if (fd_notify > 0)
 		SAFE_CLOSE(fd_notify);
 
-	umount_bind_mount();
+	umount_layers();
 }
 
 static const char *const resource_files[] = {
