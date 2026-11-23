@@ -48,15 +48,23 @@
 #define MNT2_PATH "bind_mnt"
 #define TEST_DIR_NAME "testdir"
 #define TEST_DIR MOUNT_PATH"/"TEST_DIR_NAME
-#define FILE_EXEC_PATH TEST_DIR"/"TEST_APP
 
 static char notfound[BUF_SIZE];
+/*
+ * The test dir on the watched filesystem, where the test files are created
+ * and marks are set, and the test dir via which the child accesses them.
+ */
+static const char *watch_dir = TEST_DIR;
+static const char *access_dir = TEST_DIR;
+
+/* Paths in access_dir */
 static char fname[BUF_SIZE];
+static char exec_path[BUF_SIZE];
 static char lookup_path[BUF_SIZE];
 static char newent_path[BUF_SIZE];
 static char entry_path[BUF_SIZE];
 static char renamed_path[BUF_SIZE];
-/* A path in TEST_DIR relative to the mount root, for use with bind_mount_fd */
+/* A path in watch_dir relative to the mount root, for use with bind_mount_fd */
 #define MOUNT_RELATIVE(path) ((path) + sizeof(MOUNT_PATH))
 /* The name of TEST_DIR in lookup events */
 static const char testdir_name[] = TEST_DIR_NAME;
@@ -309,6 +317,13 @@ static int consume_event(struct event **event, unsigned long long mask,
 	return expected_errno((*event)++->response);
 }
 
+/* Convert a path in access_dir to the same path in watch_dir */
+static const char *watch_path(char *buf, const char *path)
+{
+	snprintf(buf, BUF_SIZE, "%s%s", watch_dir, path + strlen(access_dir));
+	return buf;
+}
+
 /* The name in events of a path is the last path component */
 static const char *path_name(const char *path)
 {
@@ -321,7 +336,7 @@ static void generate_events(struct tcase *tc)
 {
 	int fd;
 	char *addr;
-	char *const argv[] = {FILE_EXEC_PATH, NULL};
+	char *const argv[] = {exec_path, NULL};
 	struct event *event = tc->event_set;
 	int exp_ret, exp_errno = 0;
 
@@ -369,7 +384,7 @@ static void generate_events(struct tcase *tc)
 		 */
 		while (is_event(event, FAN_PRE_DIR_ACCESS, NULL)) {
 			exp_errno = consume_event(&event, FAN_PRE_DIR_ACCESS, NULL);
-			dir = SAFE_OPENDIR(TEST_DIR);
+			dir = SAFE_OPENDIR(access_dir);
 			errno = 0;
 			ent = readdir(dir);
 			if (exp_errno ? ent || errno != exp_errno : !ent) {
@@ -470,14 +485,14 @@ static void generate_events(struct tcase *tc)
 	 * at all or being watched but not with pre-content events in mask.
 	 */
 	if (!exp_errno && !(tc->mask & FAN_PRE_DIR_ACCESS)) {
-		fd = SAFE_OPEN(FILE_EXEC_PATH, O_RDWR);
+		fd = SAFE_OPEN(exec_path, O_RDWR);
 		if (!tc->event_set[0].mask)
 			exp_errno = ETXTBSY;
 	}
 
 	exp_ret = exp_errno ? -1 : 0;
 	errno = 0;
-	if (execve(FILE_EXEC_PATH, argv, environ) != exp_ret || errno != exp_errno) {
+	if (execve(exec_path, argv, environ) != exp_ret || errno != exp_errno) {
 		tst_res(TFAIL, "execve() got errno %d (expected %d)", errno, exp_errno);
 		exit(5);
 	} else if (errno == exp_errno) {
@@ -547,7 +562,7 @@ static int setup_mark(unsigned int n)
 	unsigned int i = 0;
 	struct tcase *tc = &tcases[n];
 	struct fanotify_mark_type *mark = &tc->mark;
-	char *const files[] = {fname, FILE_EXEC_PATH};
+	char files[2][BUF_SIZE];
 
 	tst_res(TINFO, "Test #%d: %s", n, tc->tname);
 
@@ -566,13 +581,13 @@ static int setup_mark(unsigned int n)
 
 	if (mark->flag == FAN_MARK_PARENT) {
 		SAFE_FANOTIFY_MARK(fd_notify, FAN_MARK_ADD | mark->flag,
-				   tc->mask, AT_FDCWD, TEST_DIR);
+				   tc->mask, AT_FDCWD, watch_dir);
 		return 0;
 	}
 
 	/*
 	 * Mark the mount or sb via the mount root, so that setting the mark
-	 * does not instantiate dentries in TEST_DIR.
+	 * does not instantiate dentries in watch_dir.
 	 */
 	if (mark->flag != FAN_MARK_INODE) {
 		SAFE_FANOTIFY_MARK(fd_notify, FAN_MARK_ADD | mark->flag,
@@ -580,6 +595,8 @@ static int setup_mark(unsigned int n)
 		return 0;
 	}
 
+	watch_path(files[0], fname);
+	watch_path(files[1], exec_path);
 	for (; i < ARRAY_SIZE(files); i++) {
 		SAFE_FANOTIFY_MARK(fd_notify, FAN_MARK_ADD | mark->flag,
 				  tc->mask, AT_FDCWD, files[i]);
@@ -616,14 +633,15 @@ static void test_fanotify(unsigned int n)
 	int ret, len = 0, i = 0, test_num = 0;
 	struct tcase *tc = &tcases[n];
 	struct event *event_set = tc->event_set;
+	char path[BUF_SIZE];
 
 	if (setup_mark(n) != 0)
 		return;
 
-	sprintf(lookup_path, TEST_DIR"/enoent_%u", n);
-	sprintf(newent_path, TEST_DIR"/newent_%u", n);
-	sprintf(entry_path, TEST_DIR"/entry_%u", n);
-	sprintf(renamed_path, TEST_DIR"/renamed_%u", n);
+	sprintf(lookup_path, "%s/enoent_%u", access_dir, n);
+	sprintf(newent_path, "%s/newent_%u", access_dir, n);
+	sprintf(entry_path, "%s/entry_%u", access_dir, n);
+	sprintf(renamed_path, "%s/renamed_%u", access_dir, n);
 
 	run_child(tc);
 
@@ -814,10 +832,12 @@ static void test_fanotify(unsigned int n)
 	check_child();
 
 	/* Remove the populated and created entries via the ignored bind mount */
-	if (unlinkat(bind_mount_fd, MOUNT_RELATIVE(lookup_path), 0) && errno != ENOENT)
-		tst_brk(TBROK | TERRNO, "unlinkat(%s) failed", lookup_path);
-	if (unlinkat(bind_mount_fd, MOUNT_RELATIVE(newent_path), 0) && errno != ENOENT)
-		tst_brk(TBROK | TERRNO, "unlinkat(%s) failed", newent_path);
+	watch_path(path, lookup_path);
+	if (unlinkat(bind_mount_fd, MOUNT_RELATIVE(path), 0) && errno != ENOENT)
+		tst_brk(TBROK | TERRNO, "unlinkat(%s) failed", path);
+	watch_path(path, newent_path);
+	if (unlinkat(bind_mount_fd, MOUNT_RELATIVE(path), 0) && errno != ENOENT)
+		tst_brk(TBROK | TERRNO, "unlinkat(%s) failed", path);
 
 	if (fd_notify > 0)
 		SAFE_CLOSE(fd_notify);
@@ -827,21 +847,27 @@ static void test_fanotify(unsigned int n)
 
 static void setup(void)
 {
+	char path[BUF_SIZE];
+
 	page_sz = getpagesize();
 
-	SAFE_MKDIR(TEST_DIR, 0755);
-	sprintf(fname, TEST_DIR"/fname_%d", getpid());
-	SAFE_FILE_PRINTF(fname, "1");
-	SAFE_TRUNCATE(fname, page_sz*101);
+	sprintf(fname, "%s/fname_%d", access_dir, getpid());
+	sprintf(exec_path, "%s/%s", access_dir, TEST_APP);
 
-	require_fanotify_pre_content_fid_supported_on_fs(fname);
+	/* Create the test files on the watched filesystem */
+	SAFE_MKDIR(watch_dir, 0755);
+	watch_path(path, fname);
+	SAFE_FILE_PRINTF(path, "1");
+	SAFE_TRUNCATE(path, page_sz*101);
+
+	require_fanotify_pre_content_fid_supported_on_fs(path);
 	pre_dir_access_unsupported = fanotify_flags_supported_on_fs(
 						FAN_CLASS_PRE_CONTENT |
 						FAN_REPORT_DFID_NAME_TARGET,
 						FAN_MARK_INODE,
 						FAN_PRE_DIR_ACCESS, MOUNT_PATH);
 
-	SAFE_CP(TEST_APP, FILE_EXEC_PATH);
+	SAFE_CP(TEST_APP, watch_path(path, exec_path));
 
 	mount_cycle();
 }
